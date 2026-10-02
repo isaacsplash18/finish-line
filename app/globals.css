@@ -1,26 +1,109 @@
 @import "tailwindcss";
 
+/* =====================================================================
+   Finish Line — design tokens.
+
+   Dark UI, big numbers, one accent. The rules, in order of importance:
+
+   1. RED (`danger`) IS RESERVED. It means Stuck or Forfeited. Nothing else
+      may be red — not delete buttons, not validation, not destructive
+      confirmations. If red is everywhere it stops meaning anything.
+   2. AMBER (`warn`) means over the soft WIP cap. It is the "you are paying
+      for this" colour (SPEC-CHANGES §4).
+   3. ORANGE (`accent`) is the brand: active nav, primary buttons, the Focus
+      hero, at-cap state.
+   4. EMERALD (`positive`) is for Done / claimable / streaks.
+   Everything else is zinc.
+
+   Use the semantic names (bg / surface / line / muted / accent), not raw
+   zinc-800 etc, so a re-skin is one file.
+   ===================================================================== */
+
+@theme {
+  /* Surfaces */
+  --color-bg: #09090b;
+  --color-surface: #131316;
+  --color-surface-2: #1b1b20;
+  --color-surface-3: #24242b;
+  --color-line: #27272a;
+  --color-line-strong: #3f3f46;
+
+  /* Text */
+  --color-text: #fafafa;
+  --color-muted: #a1a1aa;
+  --color-faint: #71717a;
+
+  /* Accent — orange. Brand + primary actions. */
+  --color-accent: #f97316;
+  --color-accent-hover: #fb8a3c;
+  --color-accent-dim: #c2560c;
+  --color-accent-ink: #1a0d02;
+  --color-accent-wash: #2a1608;
+
+  /* Warning — amber. Over the soft WIP cap. Never for stuck. */
+  --color-warn: #f5b301;
+  --color-warn-wash: #2b2107;
+
+  /* Danger — red. STUCK AND FORFEIT ONLY. */
+  --color-danger: #ef4444;
+  --color-danger-dim: #b91c1c;
+  --color-danger-wash: #2a0f0f;
+
+  /* Positive — emerald. Done, claimable, streaks. */
+  --color-positive: #10b981;
+  --color-positive-wash: #072a20;
+
+  --font-sans: var(--font-geist-sans), ui-sans-serif, system-ui, sans-serif;
+  --font-mono: var(--font-geist-mono), ui-monospace, monospace;
+
+  /* Height of the mobile bottom tab bar; used for page padding. */
+  --spacing-tabbar: 4.25rem;
+}
+
 :root {
-  --background: #ffffff;
-  --foreground: #171717;
+  color-scheme: dark;
 }
 
-@theme inline {
-  --color-background: var(--background);
-  --color-foreground: var(--foreground);
-  --font-sans: var(--font-geist-sans);
-  --font-mono: var(--font-geist-mono);
-}
-
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
-  }
+html,
+body {
+  background-color: var(--color-bg);
+  color: var(--color-text);
 }
 
 body {
-  background: var(--background);
-  color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+  /* Respect the iOS home indicator when installed to the home screen. */
+  padding-bottom: env(safe-area-inset-bottom);
+}
+
+/* Big numbers should never look like body copy. */
+.tabular {
+  font-variant-numeric: tabular-nums;
+}
+
+/* Stuck projects pulse red (PRD §8.2). Honours reduced-motion. */
+@keyframes finish-line-pulse {
+  0%,
+  100% {
+    box-shadow: 0 0 0 0 color-mix(in oklab, var(--color-danger) 45%, transparent);
+  }
+  50% {
+    box-shadow: 0 0 0 6px color-mix(in oklab, var(--color-danger) 0%, transparent);
+  }
+}
+
+.pulse-stuck {
+  animation: finish-line-pulse 2.4s ease-out infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .pulse-stuck {
+    animation: none;
+  }
+}
+
+::selection {
+  background: var(--color-accent);
+  color: var(--color-accent-ink);
 }

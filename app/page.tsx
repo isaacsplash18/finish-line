@@ -1,69 +1,146 @@
-import Image from "next/image";
+import {
+  AppShell,
+  CountdownChip,
+  EmptyState,
+  ScoreHero,
+  SectionTitle,
+  WipCounter,
+} from '@/components';
+import { ActiveProjectCard } from '@/components/dashboard/ActiveProjectCard';
+import { RewardStrip } from '@/components/dashboard/RewardStrip';
+import { RoutineChecklist } from '@/components/dashboard/RoutineChecklist';
+import { getDashboardData } from '@/lib/data';
 
-export default function Home() {
+export const metadata = { title: 'Dashboard' };
+
+/** Delta vs the previous day's snapshot, or null if there isn't one. */
+function deltaOf(values: number[]): number | null {
+  if (values.length < 2) return null;
+  return values[values.length - 1] - values[values.length - 2];
+}
+
+function flowCaption(flow: number): string {
+  if (flow >= 90) return 'Locked in.';
+  if (flow >= 70) return 'Mostly on pace.';
+  if (flow >= 40) return 'Slipping.';
+  return "You're not doing the routines.";
+}
+
+function focusCaption(stuckCount: number, isOverCap: boolean, overBy: number, dailyBleed: number, focus: number): string {
+  if (stuckCount > 0) {
+    return `${stuckCount} ${stuckCount === 1 ? 'project' : 'projects'} stuck, bleeding.`;
+  }
+  if (isOverCap) {
+    return `${overBy} over cap — ${dailyBleed}/day gone.`;
+  }
+  if (focus >= 90) return 'Clean.';
+  return 'Recovering.';
+}
+
+function lockReasonFor(stuckCount: number, isOverCap: boolean, wipLabel: string): string | undefined {
+  if (!stuckCount && !isOverCap) return undefined;
+  const parts: string[] = [];
+  if (stuckCount) parts.push(`${stuckCount} ${stuckCount === 1 ? 'project' : 'projects'} stuck`);
+  if (isOverCap) parts.push(`${wipLabel} — over cap`);
+  return parts.join(', ');
+}
+
+export default async function DashboardPage() {
+  const data = await getDashboardData();
+
+  const sabbathToday = data.routines.some((r) => r.is_sabbath && r.doneToday);
+
+  const flowHistory = data.snapshots.map((s) => s.flow);
+  const focusHistory = data.snapshots.map((s) => s.focus);
+  const flowDelta = deltaOf(flowHistory);
+  const focusDelta = deltaOf(focusHistory);
+
+  // Projects worth surfacing: everything Active, plus any stuck project that
+  // isn't Active (e.g. a Shipped project gone idle) — the last mile is the
+  // whole point of this app, it should not be able to hide off-screen.
+  const activeIds = new Set(data.activeProjects.map((p) => p.id));
+  const extraStuck = data.stuckProjects.filter((p) => !activeIds.has(p.id));
+  const projectsToShow = [...data.activeProjects, ...extraStuck];
+
+  const lockReason = lockReasonFor(data.stuckProjects.length, data.isOverCap, data.wip.label);
+
   return (
-    <div className="flex flex-col flex-1 items-center justify-center bg-zinc-50 font-sans dark:bg-black">
-      <main className="flex flex-1 w-full max-w-3xl flex-col items-center justify-between py-32 px-16 bg-white dark:bg-black sm:items-start">
-        <Image
-          className="dark:invert h-5 w-[100px]"
-          src="/next.svg"
-          alt="Next.js logo"
-          width={100}
-          height={20}
-          priority
-        />
-        <div className="flex flex-col items-center gap-6 text-center sm:items-start sm:text-left">
-          <h1 className="max-w-xs text-3xl font-semibold leading-10 tracking-tight text-black dark:text-zinc-50">
-            To get started, edit the{" "}
-            <code className="rounded bg-black/[.06] px-1.5 py-0.5 font-mono text-[0.9em] dark:bg-white/[.08]">
-              page.tsx
-            </code>{" "}
-            file.
-          </h1>
-          <p className="max-w-md text-lg leading-8 text-zinc-600 dark:text-zinc-400">
-            Looking for a starting point or more instructions? Head over to{" "}
-            <a
-              href="https://vercel.com/templates?framework=next.js&utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-              className="font-medium text-zinc-950 dark:text-zinc-50"
-            >
-              Templates
-            </a>{" "}
-            or the{" "}
-            <a
-              href="https://nextjs.org/learn?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-              className="font-medium text-zinc-950 dark:text-zinc-50"
-            >
-              Learning
-            </a>{" "}
-            center.
-          </p>
-        </div>
-        <div className="flex flex-col gap-4 text-base font-medium sm:flex-row">
-          <a
-            className="flex h-12 w-full items-center justify-center gap-2 rounded-full bg-foreground px-5 text-background transition-colors hover:bg-[#383838] dark:hover:bg-[#ccc] md:w-[158px]"
-            href="https://vercel.com/new?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            <Image
-              className="dark:invert h-[14px] w-4"
-              src="/vercel.svg"
-              alt="Vercel logomark"
-              width={16}
-              height={14}
-            />
-            Deploy Now
-          </a>
-          <a
-            className="flex h-12 w-full items-center justify-center rounded-full border border-solid border-black/[.08] px-5 transition-colors hover:border-transparent hover:bg-black/[.04] dark:border-white/[.145] dark:hover:bg-[#1a1a1a] md:w-[158px]"
-            href="https://nextjs.org/docs?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            Documentation
-          </a>
-        </div>
-      </main>
-    </div>
+    <AppShell
+      title="Dashboard"
+      subtitle="Finish what you start."
+      action={<WipCounter activeCount={data.wip.activeCount} cap={data.wip.cap} dailyBleed={data.wip.dailyBleed} />}
+    >
+      <div className="flex flex-col gap-8">
+        {/* Scores */}
+        <section className="grid grid-cols-2 gap-3">
+          <ScoreHero
+            label="Flow"
+            value={data.flow}
+            history={flowHistory}
+            delta={flowDelta}
+            caption={flowCaption(data.flow)}
+            tone="positive"
+          />
+          <ScoreHero
+            label="Focus"
+            value={data.focus}
+            history={focusHistory}
+            delta={focusDelta}
+            caption={focusCaption(data.stuckProjects.length, data.isOverCap, data.wip.overBy, data.wip.dailyBleed, data.focus)}
+            tone="accent"
+          />
+        </section>
+
+        {/* Today's routines */}
+        <section>
+          <SectionTitle>Today</SectionTitle>
+          <RoutineChecklist routines={data.routines} sabbathToday={sabbathToday} />
+        </section>
+
+        {/* Active projects */}
+        <section>
+          <SectionTitle action={<span className="tabular text-xs text-faint">{projectsToShow.length}</span>}>
+            Active projects
+          </SectionTitle>
+          {projectsToShow.length === 0 ? (
+            <EmptyState>
+              Nothing active. Either you finished everything or you haven&apos;t started.
+            </EmptyState>
+          ) : (
+            <ul className="flex flex-col gap-3">
+              {projectsToShow.map((project) => (
+                <ActiveProjectCard key={project.id} project={project} />
+              ))}
+            </ul>
+          )}
+        </section>
+
+        {/* Key dates */}
+        <section>
+          <SectionTitle>Coming up</SectionTitle>
+          {data.keyDates.length === 0 ? (
+            <EmptyState>No key dates yet.</EmptyState>
+          ) : (
+            <div className="flex flex-wrap gap-2">
+              {data.keyDates.map((kd) => (
+                <CountdownChip
+                  key={kd.id}
+                  name={kd.name}
+                  daysAway={kd.daysAway}
+                  projectName={kd.project?.name}
+                  overdue={kd.daysAway < 0 && kd.project != null && kd.project.stage !== 'done'}
+                />
+              ))}
+            </div>
+          )}
+        </section>
+
+        {/* Rewards */}
+        <section>
+          <SectionTitle>Rewards</SectionTitle>
+          <RewardStrip rewards={data.rewards} lockReason={lockReason} />
+        </section>
+      </div>
+    </AppShell>
   );
 }

@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512" role="img" aria-label="Finish Line">
+  <title>Finish Line</title>
+  <!-- Solid near-black background (full bleed, safe for maskable icons) -->
+  <rect x="0" y="0" width="512" height="512" fill="#0a0a0a"/>
+
+  <!-- Mark: a bold arrow breaking through a finish line bar.
+       Single orange accent (#f97316, Tailwind orange-500 / app accent token).
+       All shapes kept within an 80 percent safe zone (56 to 456 of 512) for maskable crop. -->
+  <g fill="#f97316">
+    <!-- Vertical finish-line bar -->
+    <rect x="328" y="76" width="40" height="360"/>
+    <!-- Arrow shaft, running into the bar -->
+    <rect x="100" y="206" width="248" height="100"/>
+    <!-- Arrowhead, piercing through and past the bar -->
+    <polygon points="338,146 338,366 450,256"/>
+  </g>
+</svg>

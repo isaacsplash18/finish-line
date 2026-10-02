@@ -1,36 +1,41 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# Finish Line
 
-## Getting Started
+A single-user app whose entire purpose is to make Isaac finish what he starts.
 
-First, run the development server:
+- Track every project through Idea → Building → Shipped → Commercialising → Done,
+  with a soft WIP cap that prices distraction instead of blocking it.
+- A reward economy where finishing buys something real, and stalling, over-committing
+  or abandoning costs something the app can actually enforce.
+- Daily and weekly routines rolled up into two hero numbers: **Flow** and **Focus**.
+
+Dark UI. Big numbers. Red means Stuck or Forfeited, and nothing else.
+
+## Run it
 
 ```bash
+npm install
+cp .env.example .env.local     # Supabase URL + anon key
 npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+Then run `supabase/migrations/0001_init.sql` in the Supabase SQL editor. It is
+idempotent and seeds enough data to be useful on day one.
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+## Scripts
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+| Command | What |
+| --- | --- |
+| `npm run dev` | Dev server |
+| `npm run build` | Production build (type-checks) |
+| `npm test` | Score maths unit tests |
+| `npm run lint` | ESLint |
 
-## Learn More
+## Docs
 
-To learn more about Next.js, take a look at the following resources:
+- **`ARCHITECTURE.md`** — the contract: file map, data-access signatures,
+  component props, styling rules, PRD deviations. Read this first.
+- **`SPEC-CHANGES.md`** — authoritative amendments to the PRD.
+- **`PRD-focus-app.md`** — the original spec.
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
-
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
-
-## Deploy on Vercel
-
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
-
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+Nightly recompute runs at `GET /api/cron` (Vercel Cron, 16:00 UTC = midnight SGT),
+and lazily on dashboard load if the cron missed a night.
