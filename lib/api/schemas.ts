@@ -38,6 +38,10 @@ export const createProjectBody = z.strictObject({
     })
     .optional(),
   stage_target_date: dateKey.nullable().optional(),
+  /** v2 §5 — defaults to 'project'. */
+  kind: z.enum(['project', 'area'], { message: "Must be 'project' or 'area'." }).optional(),
+  /** v2 §6 — "owner/name" or a github.com URL. */
+  github_repo: nullableText.optional(),
 });
 
 export const updateProjectBody = z.strictObject({
@@ -45,6 +49,10 @@ export const updateProjectBody = z.strictObject({
   resolution: nullableText.optional(),
   next_action: text.optional(),
   stage_target_date: dateKey.nullable().optional(),
+  /** v2 §5 — convert between a finishable project and an ongoing area. */
+  kind: z.enum(['project', 'area'], { message: "Must be 'project' or 'area'." }).optional(),
+  /** v2 §6 — "owner/name" or a github.com URL; null unlinks. */
+  github_repo: nullableText.optional(),
 });
 
 /** Killed / Abandoned have their own endpoints so a reason is always captured. */
@@ -153,4 +161,31 @@ export const updateKeyDateBody = z.strictObject({
 
 export const listScoresQuery = z.object({
   days: queryInt(1, 366).optional(),
+});
+
+/* ------------------------------------------------------------------ */
+/* v2 — Today's move, review, seasons (SPEC-V2.md)                     */
+/* ------------------------------------------------------------------ */
+
+export const didItBody = z.strictObject({
+  projectId: uuid,
+  /** "Next action?" — omitted, null, blank or unchanged keeps the current one. */
+  nextAction: nullableText.optional(),
+});
+
+export const skipMoveBody = z.strictObject({
+  projectId: uuid,
+});
+
+export const reviewQuery = z.object({
+  /** Monday of the week; defaults to the week under review today. */
+  weekStart: dateKey.optional(),
+});
+
+export const completeReviewBody = z.strictObject({
+  weekStart: dateKey.optional(),
+});
+
+export const createSeasonBody = z.strictObject({
+  name: nullableText.optional(),
 });

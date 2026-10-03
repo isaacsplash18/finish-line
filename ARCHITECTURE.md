@@ -1,13 +1,15 @@
 # Finish Line — architecture & agent contract
 
-Foundation is built. Screens are not. This document is the contract between the
-foundation and the five screen agents.
+Foundation and screens are built (v1 + v2). This document is the contract
+between the data/scoring foundation and the screens.
 
 Authoritative specs, in precedence order:
 
-1. `SPEC-CHANGES.md` — overrides PRD §3.2, §4.3.3, §6.2, §13.1
-2. `PRD-focus-app.md`
-3. This document
+1. `SPEC-V2.md` — Finish Line v2 (weekly Focus, Today's move, areas, review,
+   seasons). Overrides everything below where they conflict. See §11.
+2. `SPEC-CHANGES.md` — overrides PRD §3.2, §4.3.3, §6.2, §13.1
+3. `PRD-focus-app.md`
+4. This document
 
 ---
 
@@ -38,6 +40,7 @@ app/
   page.tsx                      Dashboard          (+ actions.ts)
   projects/page.tsx             Projects kanban    (+ projects/actions.ts)
   projects/[id]/page.tsx        Project detail
+  review/page.tsx               Weekly review (v2)  (+ review/actions.ts)
   routines/page.tsx             Routines           (+ routines/actions.ts)
   settings/page.tsx             Settings           (+ settings/actions.ts)
   api/cron/route.ts             GET/POST nightly recompute
@@ -58,8 +61,10 @@ lib/
   types.ts                      whole data model + Supabase `Database` generic
   dates.ts                      DateKey helpers, all in Asia/Singapore
   cn.ts                         classname joiner
-  scores.ts                     PURE score maths + cost-preview copy
-  scores.test.ts                32 tests
+  scores.ts                     PURE v2 engine: Focus week, Flow, stuck, Today's move,
+                                counters, review week, cost-preview copy
+  scores.test.ts                v2 engine tests
+  github.ts (+ .test.ts)        PURE GitHub helpers (repo normalising, commit days)
   supabase/env.ts               env reading, SupabaseConfigError, isSupabaseConfigured
   supabase/server.ts            getSupabaseServerClient()  (server only)
   supabase/client.ts            getSupabaseBrowserClient() ('use client')
@@ -67,8 +72,11 @@ lib/
   data/                         server-side data access — see §5
     index.ts errors.ts projects.ts rewards.ts routines.ts
     key-dates.ts scores.ts dashboard.ts
+    progress-events.ts moves.ts reviews.ts seasons.ts github.ts   (v2)
 
 supabase/migrations/0001_init.sql   schema + seed
+supabase/migrations/0002_v2.sql     v2: projects.kind/github_repo, progress_events,
+                                    reviews, seasons, daily_moves (+ backfill)
 public/sw.js  public/offline.html
 public/icons/                       icon-192.png / icon-512.png / icon-32.png / icon.svg
 app/favicon.ico                     App Router favicon convention → /favicon.ico
@@ -127,7 +135,10 @@ const wip = await getWipStatus();
 ```
 
 Per-move: `await previewStageMove(id, 'building')` returns the same shape plus
-`killBonusCopy`.
+`isActivation` and `killBonusCopy`. Only a start (Idea → active) can carry the
+−15; Shipped → Commercialising says "No activation charge" and names the
+bleed only if it lands over cap; moves that don't add an active project have
+empty copy.
 
 ### 4.2 Next action is required
 
@@ -150,24 +161,28 @@ a **decisive kill: +10 Focus**. Killing an Idea is Focus-neutral. Show
 
 Done / Killed / Abandoned cannot move again — `InvalidTransitionError`.
 
-### 4.6 Stuck
+### 4.6 Stuck (v2 — SPEC-V2 §2)
 
 A project is Stuck when either:
 
-- no stage change AND no next-action edit for 14 days (Building / Shipped /
-  Commercialising only — parked Ideas are free, PRD §3.3), or
-- a linked key date has passed and the project is not Done (any non-terminal
-  stage).
+- no **progress signal** for 14 days (Building / Shipped / Commercialising
+  only — parked Ideas are free). A progress signal is any `progress_events`
+  row (Did-it tap, commit on the linked repo, next-action edit, stage change)
+  or the `stage_changed_at` / `next_action_updated_at` clocks on the row; or
+- a linked key date has passed, the project is not terminal, and there has
+  been no progress signal since that date (any non-terminal stage).
 
-Written by `recomputeStuckFlags()`, which back-dates `stuck_since` to the day it
-actually went stale.
+Areas are never stuck. Any progress signal clears Stuck **instantly**
+(`logProgress`, `updateProject`, `moveProjectStage` clear the flag
+themselves); `recomputeStuckFlags()` (nightly) sets it, back-dated to the day
+it actually went stale, using the pure `stuckSince()`.
 
-### 4.7 Reward gate
+### 4.7 Reward gate (v2)
 
-Unclaimed rewards are locked while **any project is Stuck OR the portfolio is
-over cap** (SPEC-CHANGES §3). `applyRewardLockingRule()` runs after every stage
-change and in the nightly recompute. `claimReward` throws unless status is
-`claimable`.
+Unclaimed rewards are locked **only while the portfolio is over cap**
+(SPEC-V2 §3; areas never count). Stuck no longer locks rewards.
+`applyRewardLockingRule()` runs after every stage change / kind change and in
+the nightly recompute. `claimReward` throws unless status is `claimable`.
 
 ---
 
@@ -197,8 +212,8 @@ getProjectOrThrow(id: UUID): Promise<ProjectDetail>
 getStageEvents(sinceDate?: DateKey): Promise<StageEvent[]>
 
 getWipStatus(): Promise<WipStatus>
-previewStageMove(id: UUID, toStage: ProjectStage):
-  Promise<WipCostPreview & { killBonusCopy: string | null }>
+previewStageMove(id: UUID, toStage: ProjectStage): Promise<StageMovePreview>
+  // = WipCostPreview & { isActivation, killBonusCopy } — via describeStageMoveCost
 getKillPreview(id: UUID): Promise<{ project: Project; bonusCopy: string | null }>
 
 createProject(input: CreateProjectInput): Promise<ProjectWithMeta>
@@ -214,11 +229,23 @@ eraseProject(id: UUID): Promise<EraseProjectResult>   // hard delete of a FRESH 
                                                       // 409-style InvalidTransitionError if it has
                                                       // a claimed reward or pre-today history
 
-recomputeStuckFlags(asOf?: DateKey): Promise<StuckRecomputeResult>
+recomputeStuckFlags(asOf?: DateKey): Promise<StuckRecomputeResult>   // v2 rule, §4.6
+
+// v2
+isActiveProject(project): boolean                     // active stage AND kind='project'
+setProjectKind(id: UUID, kind: ProjectKind): Promise<ProjectWithMeta>        // 'project' | 'area'
+setProjectRepo(id: UUID, repo: string | null): Promise<ProjectWithMeta>      // "owner/name" or URL
+getStageEvents(sinceDate?: DateKey): Promise<StageEvent[]>                   // paged past 1000 rows
+getAllStageEvents(): Promise<StageEvent[]>                                   // React.cache'd
 ```
 
 `ProjectWithMeta` = the row plus `isStuck`, `isActive`, `isTerminal`,
-`daysInStage`, `daysIdle`, `daysToTarget`, `reward`.
+`daysInStage`, `daysIdle`, `daysToTarget`, `reward`. In v2 `isActive` and
+`isStuck` are always false for areas, and `kind` / `github_repo` are filled
+in (`'project'` / `null`) for rows read before migration 0002.
+`GetProjectsOptions` gained `kinds?: ProjectKind[]` and
+`seasonStartedAt?: Timestamp` (hide terminal projects that ended before the
+season — the board default once a new season starts).
 
 ### Rewards — `lib/data/rewards.ts`
 
@@ -231,6 +258,7 @@ deleteReward(id: UUID): Promise<void>
 claimReward(id: UUID): Promise<Reward>                 // throws unless claimable
 forfeitReward(id: UUID): Promise<Reward>
 applyRewardLockingRule(): Promise<RewardLockResult>    // { locked, hasStuckProject, isOverCap, … }
+computeRewardGate(projects): { locked, … }             // pure; v2: locked === isOverCap
 ```
 
 ### Routines — `lib/data/routines.ts`
@@ -253,6 +281,10 @@ toggleRoutine(routineId: UUID, date?: DateKey): Promise<RoutineCheck>  // the 1-
 incrementRoutine(routineId: UUID, date?: DateKey, by?: number): Promise<RoutineCheck>
 setSabbath(date?: DateKey): Promise<RoutineCheck>
 clearSabbath(date?: DateKey): Promise<RoutineCheck | null>
+
+// v2 — POST /api/v1/hooks/workout
+getWorkoutRoutine(): Promise<Routine | null>           // active routine named config.hooks.workoutRoutineName
+logWorkoutFromHook(): Promise<{ routine, check }>      // +1 on TODAY only
 ```
 
 One row per routine per date (DB unique constraint). `setSabbath` clears any
@@ -272,16 +304,79 @@ deleteKeyDate(id: UUID): Promise<void>
 ### Scores — `lib/data/scores.ts`
 
 ```ts
+getFocusWeek(now?: Date): Promise<FocusWeekBreakdown>          // v2: live, this week
+getCounters(now?: Date): Promise<CountersSummary>              // v2: up-only, season + lifetime
+getFlow(asOf?: DateKey): Promise<FlowScoreBreakdown>           // v2: live, rolling 7 days
+focusWeekFromRows(rows, weekStart, now?): FocusWeekBreakdown   // pure assembly (dashboard reuses)
+countersFromRows(rows, now?): CountersSummary                  // pure assembly
 getScoreSnapshots(days?: number, asOf?: DateKey): Promise<ScoreSnapshot[]>  // oldest first, 30
 getTodaySnapshot(asOf?: DateKey): Promise<ScoreSnapshot | null>
-computeAndSnapshotToday(asOf?: DateKey): Promise<RecomputeResult>
-ensureTodaySnapshot(asOf?: DateKey): Promise<ScoreSnapshot>   // lazy fallback
+computeAndSnapshotToday(asOf?: DateKey, options?: { syncGithub?: boolean }): Promise<RecomputeResult>
+ensureTodaySnapshot(asOf?: DateKey): Promise<ScoreSnapshot>   // lazy fallback (no GitHub)
 ```
 
-`computeAndSnapshotToday()` does, in order: recompute stuck flags → apply the
-reward gate → compute Flow → compute Focus → upsert today's snapshot. Idempotent.
-Called by `GET /api/cron` (Vercel cron, 16:00 UTC = midnight SGT) and lazily by
-`getDashboardData()`.
+`computeAndSnapshotToday()` does, in order: sync GitHub commits → recompute
+stuck flags → apply the reward gate → compute live Flow + this week's Focus →
+upsert today's snapshot (which now only feeds the sparklines). Idempotent.
+Called by `GET /api/cron` (Vercel cron, 16:00 UTC = midnight SGT) and lazily
+by `getDashboardData()` (with `syncGithub: false`). `RecomputeResult.focus` is
+now a `FocusWeekBreakdown`, plus `github: GithubSyncResult | null`.
+
+### Today's move — `lib/data/moves.ts` (v2)
+
+```ts
+getTodaysMove(asOf?: DateKey): Promise<TodaysMove>
+logProgress(projectId: UUID, kind?: ProgressKind /* 'did_it' */, options?: {
+  nextAction?: string | null;   // blank/unchanged ⇒ keep
+  day?: DateKey;
+}): Promise<LogProgressResult>  // { project, kind, day, unstuck, nextActionUpdated }
+skipTodaysMove(projectId: UUID, day?: DateKey): Promise<SkipResult>  // never downgrades a Did-it
+```
+
+`logProgress` writes `progress_events`, upserts `daily_moves(outcome='did_it')`
+(for `did_it`), clears `stuck_since`, and optionally replaces `next_action` —
+all in one parallel batch after the load.
+
+### Progress events — `lib/data/progress-events.ts` (v2, leaf module)
+
+```ts
+recordProgress(projectId, kind, day?, { bestEffort? }): Promise<boolean>   // idempotent per day
+fetchProgressEventsSince(from) / getProgressEventsSince(from)              // uncached / cached
+fetchDidItEvents() / getDidItEvents()
+fetchDailyMovesSince(from) / getDailyMovesSince(from)
+progressLookbackStart(asOf?) / rotationLookbackStart(asOf?)
+```
+
+`moveProjectStage`, `createProject`, `importProject` and `updateProject`
+(next action) write progress with `bestEffort: true` — a failure is logged,
+never thrown, because the row's clocks already carry the same signal.
+
+### Review — `lib/data/reviews.ts` (v2)
+
+```ts
+getReviewState(weekStart?: DateKey): Promise<ReviewState>   // default: reviewWeekFor(today);
+                                                             // projects = active + Shipped (kind='project')
+getReviewDue(asOf?: DateKey): Promise<ReviewDue>
+completeReview(weekStart?: DateKey): Promise<Review>         // weekStart must be a Monday
+fetchReview(weekStart: DateKey): Promise<Review | null>
+```
+
+### Seasons — `lib/data/seasons.ts` (v2)
+
+```ts
+getCurrentSeason(): Promise<Season | null>    // cached; fetchCurrentSeason() uncached
+startSeason(name?: string | null): Promise<Season>   // default "Season N"
+```
+
+### GitHub — `lib/data/github.ts` (v2)
+
+```ts
+syncGithubProgress(options?: { recomputeStuck?: boolean; now?: Date }): Promise<GithubSyncResult>
+```
+
+Never throws. Fetches 7 days of commits per linked repo (`GITHUB_TOKEN`
+optional), writes one `progress_events(kind='commit')` per SGT commit day, and
+recomputes stuck flags if anything new landed.
 
 ### Dashboard — `lib/data/dashboard.ts`
 
@@ -289,9 +384,19 @@ Called by `GET /api/cron` (Vercel cron, 16:00 UTC = midnight SGT) and lazily by
 getDashboardData(asOf?: DateKey): Promise<DashboardPayload>
 ```
 
-One call for the whole dashboard: `flow`, `focus`, `snapshots`, `routines`,
-`activeProjects`, `stuckProjects`, `keyDates`, `rewards`, `rewardsLocked`,
-`activeCount`, `wipLimit`, `wip`, `isOverCap`.
+One call, **one parallel batch of queries**, for the whole home screen. v2
+fields: `todaysMove`, `focusWeek` (with breakdown), `counters`,
+`didItDaysThisWeek`, `reviewDue`, `season`, `areas`. Kept: `flow` (now live), `focus` (= `focusWeek.score`),
+`snapshots`, `routines`, `activeProjects`, `stuckProjects`, `keyDates`,
+`rewards`, `rewardsLocked` (over cap only), `activeCount`, `wipLimit`, `wip`,
+`isOverCap`. v2 tables are read with `unwrapOptional`, so a database without
+migration 0002 still renders (empty v2 sections) instead of 500ing.
+
+### Query helpers — `lib/data/errors.ts`
+
+`fetchAllRows(page, context, { optional })` pages past PostgREST's 1000-row
+cap; `unwrapOptional(result, context, fallback)` and `isMissingSchemaError`
+degrade reads of not-yet-migrated tables.
 
 ### Errors — `lib/data/errors.ts`
 
@@ -326,18 +431,37 @@ export async function killProjectAction(id: string, reason: string) {
 
 ## 6. Scores — `lib/scores.ts` (pure) + `lib/config.ts` (tunables)
 
-Never re-implement this maths in a screen. If you need the working, use the
-`explain*` variants.
+Never re-implement this maths in a screen. v2 signatures (see §11 for the
+model):
 
 ```ts
-computeFlowScore(input: FlowScoreInput, cfg?: AppConfig): number
-explainFlowScore(input, cfg?): FlowScoreBreakdown       // per-routine rate/target/actual
-computeFocusScore(input: FocusScoreInput, cfg?): number
-explainFocusScore(input, cfg?): FocusScoreBreakdown     // deltas, counts, over-cap days
-countOverCapProjectDays(events, window, cfg?)           // per-day Active count + overBy
+weekStartSgt(date?: Date | string, cfg?): DateKey
+computeFocusWeek(input: FocusWeekInput, weekStart?: DateKey, now?: Date | string, cfg?): FocusWeekBreakdown
+computeFlow(input: FlowScoreInput, cfg?): FlowScoreBreakdown        // = v1 explainFlowScore
+isStuck(project, progressEvents, keyDates, now?, cfg?): boolean
+stuckSince(project, progressEvents, keyDates, now?, cfg?): DateKey | null
+pickTodaysMove(projects, progressEvents, dailyMoves, today?, cfg?): TodaysMove
+computeCounters(events: CountersInput, seasonStart, now?, cfg?): CountersSummary
+reviewWeekFor(today?, cfg?): DateKey
+reviewDueFor(today, completedAt, cfg?): ReviewDue
+isVisibleInSeason(project, seasonStartedAt, cfg?): boolean
+countActiveProjects(projects, cfg?): number          // areas excluded
+rewardGate(projects, cfg?): RewardGate               // locked === over cap
+projectKindOf(project) / isArea(project)             // missing kind ⇒ 'project'
+countOverCapProjectDays(events, window, cfg?, areaIds?)
 describeActivationCost(activeCountAfter, { isNewBuild }, cfg?): WipCostPreview
+describeStageMoveCost(fromStage, toStage, activeCountBefore, cfg?): WipCostPreview & { isActivation }
+  // non-activation moves: "No activation charge, but…" only if they add an
+  // active project over the cap; otherwise empty copy
+describeImportImpact(activeCountAfter, cfg?): WipCostPreview
 describeKillBonus(stage: ProjectStage, cfg?): string | null
 ```
+
+`computeFlowScore` / `explainFlowScore` are kept as aliases. The v1
+`computeFocusScore` / `explainFocusScore` (rolling 30 days) are gone.
+
+> The v1 description below (rolling 30-day Focus, recurring stuck charges, −15
+> per new build) is **historical**. §11 is the live model.
 
 **Flow** (rolling 7 days). Each active routine contributes
 `clamp(actual / target, 0, 1)`, all weighted equally, mean × 100.
@@ -394,7 +518,7 @@ All presentational: props in, markup out. No fetching, no Supabase.
 | `Modal` | `open`, `onClose`, `title?`, `description?`, `footer?`, `tone?` — bottom sheet on mobile |
 | `Card` / `CardHeader` / `SectionTitle` / `EmptyState` | `tone: default \| accent \| overCap \| stuck` |
 
-Nav is four tabs — Dashboard, Projects, Routines, Settings. Project detail is
+Nav is five tabs — Today, Projects, Review, Routines, Settings. Project detail is
 nested under `/projects/[id]` and gets no tab. Edit `components/app/nav-items.tsx`
 if that changes.
 
@@ -462,7 +586,80 @@ numbers get `.tabular` for tabular figures, stuck cards get `.pulse-stuck`
 - [x] Project detail (PRD §8.3) — `app/projects/[id]/page.tsx`
 - [x] Routines (PRD §8.4) — `app/routines/page.tsx`
 - [x] Settings (PRD §8.5) — `app/settings/page.tsx`
+- [x] v2 home (Today's move), `/review`, areas strip, seasons, GitHub link,
+      workout hook — migration `0002_v2.sql` must be applied before the
+      v2 writes work (see `docs/V2-LIVE-CHECKLIST.md`)
 - [x] App icon + favicon — `public/icons/*`, `app/favicon.ico`
 - [x] Scaffolding marker `components/app/AgentTodo.tsx` deleted
 
 Quality gate: `npm run lint`, `npm test` and `npm run build` must all pass.
+
+---
+
+## 11. v2 — "the loop that answers back" (SPEC-V2.md)
+
+Rationale: `docs/HABIT-ANALYSIS.md`. v1 judged nightly with a meter Isaac
+couldn't move; v2 answers every tap today and judges once a week.
+
+### Data model (migration `0002_v2.sql`, additive)
+
+| Addition | Purpose |
+| --- | --- |
+| `projects.kind` `'project'\|'area'` | Areas (ongoing ventures) sit in Today's-move rotation but are exempt from WIP, stuck, activation charges, the kanban and every score. |
+| `projects.github_repo` | `owner/name`; commits become progress. |
+| `progress_events(project_id, kind, day)` unique | `did_it` / `commit` / `next_action` / `stage`. Backfilled with `stage` rows from `stage_events`. |
+| `daily_moves(day, project_id, outcome)` unique | `did_it` / `skipped` — drives "won't reappear until tomorrow" and round-robin. |
+| `reviews(week_start, completed_at)` | Sunday review completion. |
+| `seasons(started_at, name)` | Latest row = current season. Backfilled with "Season 1" starting at the earliest project/stage event (so applying the migration hides nothing and restarts no counter). |
+
+Until the migration is applied, reads of the new tables degrade to empty
+(`unwrapOptional`), `kind` defaults to `'project'`, and progress writes from
+stage moves are best-effort — v1 behaviour is preserved. Did-it / skip /
+review / season *writes* need the migration.
+
+### Scores
+
+**Focus — weekly, live, recoverable.** `computeFocusWeek` starts at 100 every
+Monday 00:00 SGT and replays this week's events on read:
+
+| Delta | When it lands | Config key |
+| --- | --- | --- |
+| −15 activation (from Idea/creation into Building/Commercialising) **only if it puts the portfolio over cap** | immediately | `focus.activationOverCapPenalty`, `activationFromStages` |
+| −10 per over-cap project per day | at each day's close, this week only | `focus.overCapPenaltyPerProjectPerDay` |
+| −10 per stuck project, **once per week** | at the first day's close it is stuck | `focus.stuckPenaltyPerWeek` |
+| −25 abandoned | immediately | `focus.abandonedPenalty` |
+| +20 done · +10 decisive kill | immediately | `focus.doneBonus`, `decisiveKillBonus` |
+| +2 per Did-it, max +10/day | immediately | `focus.didItBonus`, `didItDailyCap` |
+
+Daily charges land at a day's close, so Monday morning always reads 100 and
+acting before midnight avoids the charge; `pending` reports what would land
+tonight. The breakdown has one line per delta type with counts. Clamped 0–100
+(`raw` keeps the unclamped total). Only `kind='project'` rows count.
+
+**Flow** — v1 formula, computed live over the rolling 7 days.
+
+**Up-only counters** (`computeCounters`) — Finished · Killed on purpose
+(decisive kills) · Did-it days · Weeks under cap (completed weeks only, so the
+number never drops), per season and lifetime.
+
+**Snapshots** are still written nightly (focus = current week score, flow) but
+only feed sparklines.
+
+### Today's move
+
+`pickTodaysMove`: rotation = active projects + non-terminal areas, minus
+anything with a `daily_moves` row today. Ordered by `config.todaysMove.order`:
+stuck → nearest target date → longest since last progress → round-robin
+(least recently on the card) → name. Nothing in rotation ⇒ top Idea with
+"Start this?" and its price, or "Nothing in flight. Good.". Did it =
+`POST /moves/did-it` → `logProgress`; Not today = `POST /moves/skip`.
+
+### Review, seasons, GitHub, workout hook
+
+- Review week: on Sunday the week ending today, otherwise the week just ended
+  (`reviewWeekFor`). Banner due on Sun/Mon until `completeReview`.
+- `startSeason()` restarts season counters and (via `isVisibleInSeason`) hides
+  last season's terminal projects from the board; history stays.
+- `syncGithubProgress()` runs in the nightly job and on `POST /github/sync`.
+- `POST /api/v1/hooks/workout` takes only `WORKOUT_HOOK_TOKEN` and only adds
+  one to today's Workouts routine.

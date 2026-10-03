@@ -26,6 +26,14 @@ type RouteParams = Record<string, string | string[] | undefined>;
 export interface WithApiOptions {
   /** HTTP status for a successful response. Default 200. */
   status?: number;
+  /**
+   * Replaces the default `Authorization: Bearer <API_KEY>` check. Must throw an
+   * `ApiError` (401) to reject. Used by `/hooks/workout`, which has its own
+   * narrow token and must NOT accept the main API key.
+   */
+  auth?: (request: Request) => void;
+  /** Extra response headers on success AND error (e.g. CORS for the hook). */
+  headers?: Record<string, string>;
 }
 
 export function withApi<P extends RouteParams = RouteParams>(
@@ -34,16 +42,20 @@ export function withApi<P extends RouteParams = RouteParams>(
 ) {
   return async (request: Request, context: { params: Promise<P> }): Promise<Response> => {
     try {
-      assertApiKey(request);
+      (options.auth ?? assertApiKey)(request);
       const params = ((await context?.params) ?? {}) as P;
       const data = await handler(request, params);
       const payload: ApiSuccess<unknown> = { ok: true, data: data ?? null };
       return Response.json(payload, {
         status: options.status ?? 200,
-        headers: { 'Cache-Control': 'no-store' },
+        headers: { 'Cache-Control': 'no-store', ...options.headers },
       });
     } catch (error) {
-      return errorResponse(error);
+      const response = errorResponse(error);
+      for (const [key, value] of Object.entries(options.headers ?? {})) {
+        response.headers.set(key, value);
+      }
+      return response;
     }
   };
 }

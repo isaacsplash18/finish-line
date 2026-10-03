@@ -5,8 +5,14 @@
  * without code archaeology." If you are about to hard-code a threshold, a
  * penalty or a window length anywhere else in the codebase: put it here instead.
  *
- * Nothing in this file may import from anywhere else in the app — it must stay
- * dependency-free so `lib/scores.ts` remains pure and trivially unit-testable.
+ * v2 (SPEC-V2.md §3): Focus is a WEEKLY score that resets to 100 every Monday
+ * 00:00 Asia/Singapore, computed live on read. The v1 rolling-30-day keys
+ * (windowDays, newBuildingPenalty, stuck recurrence, over-cap charge cap) are
+ * gone — nothing reads them any more.
+ *
+ * Nothing in this file may import from anywhere else in the app (types only) —
+ * it must stay dependency-free so `lib/scores.ts` remains pure and trivially
+ * unit-testable.
  */
 
 import type { ProjectStage } from './types';
@@ -16,67 +22,52 @@ import type { ProjectStage } from './types';
 /* ------------------------------------------------------------------ */
 
 export interface FocusConfig {
-  /** PRD §6.2: score resets to this at the start of each rolling window. */
+  /** SPEC-V2 §3: Focus resets to this at the start of every week. */
   startingScore: number;
-  /** PRD §6.2: rolling window, in days, that stage events are counted over. */
-  windowDays: number;
-  /** PRD §6.2.1: penalty per project moved *into* Building during the window. */
-  newBuildingPenalty: number;
-  /** PRD §6.2.2: penalty per currently-Stuck project. Negative. */
-  stuckPenalty: number;
   /**
-   * PRD §6.2.2 says the stuck penalty is "recurring while stuck".
-   * We implement that as: the penalty is charged once immediately, then again
-   * for every full `stuckPenaltyRecurrenceDays` the project stays stuck.
-   * e.g. with 7: 0–6 days stuck = -10, 7–13 = -20, 14–20 = -30 …
-   * Set to a very large number to make the penalty a flat one-off.
+   * Day the Focus week starts on, 0 = Sunday … 6 = Saturday, in `timezone`.
+   * SPEC-V2 §3: Monday 00:00 SGT (ISO week).
    */
-  stuckPenaltyRecurrenceDays: number;
-  /** Safety valve so one forgotten project cannot dominate the score forever. */
-  maxStuckRecurrences: number;
-  /** PRD §6.2.3: penalty per project Abandoned during the window. */
-  abandonedPenalty: number;
-  /** PRD §6.2.4: bonus per project moved to Done during the window. */
-  doneBonus: number;
+  weekStartsOn: number;
   /**
-   * SPEC-CHANGES §2 — over-cap bleed. The WIP cap is a SOFT cap: going over is
-   * always allowed, but it bleeds. Charged per Active project beyond
-   * `projects.wipLimit`, per day, for every day of the rolling window on which
-   * the portfolio was over cap. Negative.
-   *
-   * Days are reconstructed from `stage_events` history — see
-   * `countOverCapProjectDays()` in lib/scores.ts.
+   * SPEC-V2 §3: activation into an active stage that puts the portfolio OVER
+   * the soft cap. At or under cap, starting is free. Negative.
+   */
+  activationOverCapPenalty: number;
+  /**
+   * Which `from_stage`s count as *starting* something (creation — from_stage
+   * null — always counts). Coming back from Shipped to fix something, or
+   * advancing Shipped → Commercialising (the last mile), is not a start.
+   */
+  activationFromStages: readonly ProjectStage[];
+  /**
+   * SPEC-V2 §3: −10 per Active project beyond the cap, per day over cap,
+   * accrued at the close of each day within the current week only.
    */
   overCapPenaltyPerProjectPerDay: number;
-  /**
-   * Safety valve on the bleed: the maximum number of over-cap *project-days*
-   * that can be charged in one window. Defaults to the window length, i.e. one
-   * project one-over for the whole window is the worst single-project case.
-   */
-  maxOverCapProjectDaysCharged: number;
-  /**
-   * SPEC-CHANGES §2 — decisive-kill bonus. Killing early is meant to be the
-   * cheapest exit: start a shiny object (−15) then kill it (+10) nets −5, far
-   * better than bleeding −10/day or abandoning at −25 plus a forfeited reward.
-   */
+  /** SPEC-V2 §3: −10 per stuck project, charged at most ONCE per week. */
+  stuckPenaltyPerWeek: number;
+  /** SPEC-V2 §3: the worst exit. The linked reward is also forfeited. */
+  abandonedPenalty: number;
+  /** SPEC-V2 §3: +20 per project moved to Done. */
+  doneBonus: number;
+  /** SPEC-V2 §3: +10 per kill of a project that reached Building or beyond. */
   decisiveKillBonus: number;
-  /**
-   * Kills from these stages earn `decisiveKillBonus` ("Building or beyond").
-   * Killing an Idea is Focus-neutral — ideas are free both ways (PRD §3.3).
-   */
+  /** Kills from (or after reaching) these stages are decisive. Idea kills are neutral. */
   killBonusStages: readonly ProjectStage[];
-  /** Hard floor / ceiling. PRD: "Both scores are 0 to 100". */
+  /** SPEC-V2 §3: +2 per Did-it tap… */
+  didItBonus: number;
+  /** …capped at this many points per day across all projects. */
+  didItDailyCap: number;
+  /** Hard floor / ceiling. */
   min: number;
   max: number;
 }
 
 export interface FlowConfig {
-  /** PRD §6.1: rolling window for routine adherence, in days. */
+  /** Rolling window for routine adherence, in days. Computed live (SPEC-V2 §3). */
   windowDays: number;
-  /**
-   * Weekly target assumed for a `daily` routine that has no explicit
-   * weekly_target (i.e. "every day").
-   */
+  /** Weekly target assumed for a `daily` routine with no explicit weekly_target. */
   defaultDailyTarget: number;
   /** What to report when there are no active routines at all. */
   scoreWhenNoRoutines: number;
@@ -85,44 +76,73 @@ export interface FlowConfig {
 }
 
 export interface ProjectsConfig {
-  /** PRD §3.1.5: days of no stage change AND no next-action edit ⇒ Stuck. */
+  /** SPEC-V2 §2: no progress signal for this many days ⇒ Stuck. */
   staleThresholdDays: number;
   /**
-   * SOFT cap on Active projects (SPEC-CHANGES §1, overriding PRD §3.2.1).
-   * Nothing in `lib/data/` ever blocks a move over this number. Going over is
-   * priced, not prevented: −15 on the way in, then `overCapPenaltyPerProjectPerDay`
-   * every day, plus rewards locked while over cap.
+   * SOFT cap on Active projects (kind='project' only — areas never count).
+   * Nothing ever blocks a move over this number; it is priced, not prevented.
    */
   wipLimit: number;
-  /** PRD §3.2.1: "Active = Building or Commercialising". */
+  /** "Active = Building or Commercialising". */
   activeStages: readonly ProjectStage[];
-  /**
-   * Stages that idle-based stale detection applies to.
-   * Idea is deliberately excluded — PRD §3.3 says ideas cost nothing and exist
-   * as a harmless outlet for the shiny-object impulse. (Key-date-triggered
-   * stuck, PRD §7.3, still applies to Idea projects.)
-   */
+  /** Stages the idle-based stuck rule applies to (Ideas stay free). */
   staleStages: readonly ProjectStage[];
   /** Stages from which a project can never move again. */
   terminalStages: readonly ProjectStage[];
+  /**
+   * How far back the data layer reads `progress_events` for stuck detection
+   * and Today's-move ordering. Older progress falls back to the
+   * `stage_changed_at` / `next_action_updated_at` clocks on the row, which
+   * only matters for the exact `stuck_since` date of long-dead projects.
+   * Must be ≥ staleThresholdDays + 7 so a whole Focus week can be evaluated.
+   */
+  progressLookbackDays: number;
+}
+
+/** The criteria `pickTodaysMove` sorts by, in priority order. */
+export type TodaysMoveCriterion = 'stuck' | 'target' | 'idle' | 'rotation';
+
+export interface TodaysMoveConfig {
+  /** SPEC-V2 §1: stuck first, then nearest target date, then longest since progress, then round-robin. */
+  order: readonly TodaysMoveCriterion[];
+  /** How many days of `daily_moves` history feed the round-robin tiebreak. */
+  rotationLookbackDays: number;
+}
+
+export interface GithubConfig {
+  /** SPEC-V2 §6: commits from the last N days are recorded on each sync. */
+  lookbackDays: number;
+  /** Per-request timeout. A slow GitHub must never hold up the nightly job. */
+  timeoutMs: number;
+  apiBase: string;
 }
 
 export interface AppConfig {
   /** Display name, used in the manifest, shell and metadata. */
   appName: string;
-  /** PRD §6: "recomputed daily at midnight SGT". */
+  /** Every day boundary in the app (weeks, streaks, snapshots) is in this zone. */
   timezone: string;
   focus: FocusConfig;
   flow: FlowConfig;
   projects: ProjectsConfig;
+  todaysMove: TodaysMoveConfig;
+  github: GithubConfig;
+  review: {
+    /** SPEC-V2 §4: days (0 = Sunday) the review banner shows until completed. */
+    bannerDays: readonly number[];
+  };
+  hooks: {
+    /** SPEC-V2 §8: the routine `POST /api/v1/hooks/workout` increments (case-insensitive name). */
+    workoutRoutineName: string;
+  };
   keyDates: {
-    /** PRD §7.2: dashboard shows the next N key dates as countdown chips. */
+    /** Dashboard shows the next N key dates as countdown chips. */
     dashboardCount: number;
   };
   ui: {
-    /** PRD §6: 30-day sparklines. */
+    /** 30-day sparklines (fed by the nightly snapshot). */
     sparklinePoints: number;
-    /** PRD §5.3.1: rolling 4-week calendar heat view per routine. */
+    /** Rolling 4-week calendar heat view per routine. */
     heatCalendarWeeks: number;
   };
 }
@@ -137,17 +157,17 @@ export const config: AppConfig = {
 
   focus: {
     startingScore: 100,
-    windowDays: 30,
-    newBuildingPenalty: -15,
-    stuckPenalty: -10,
-    stuckPenaltyRecurrenceDays: 7,
-    maxStuckRecurrences: 4,
+    weekStartsOn: 1, // Monday
+    activationOverCapPenalty: -15,
+    activationFromStages: ['idea'],
+    overCapPenaltyPerProjectPerDay: -10,
+    stuckPenaltyPerWeek: -10,
     abandonedPenalty: -25,
     doneBonus: 20,
-    overCapPenaltyPerProjectPerDay: -10,
-    maxOverCapProjectDaysCharged: 30,
     decisiveKillBonus: 10,
     killBonusStages: ['building', 'shipped', 'commercialising'],
+    didItBonus: 2,
+    didItDailyCap: 10,
     min: 0,
     max: 100,
   },
@@ -166,6 +186,26 @@ export const config: AppConfig = {
     activeStages: ['building', 'commercialising'],
     staleStages: ['building', 'shipped', 'commercialising'],
     terminalStages: ['done', 'killed', 'abandoned'],
+    progressLookbackDays: 35,
+  },
+
+  todaysMove: {
+    order: ['stuck', 'target', 'idle', 'rotation'],
+    rotationLookbackDays: 28,
+  },
+
+  github: {
+    lookbackDays: 7,
+    timeoutMs: 8000,
+    apiBase: 'https://api.github.com',
+  },
+
+  review: {
+    bannerDays: [0, 1], // Sunday, Monday
+  },
+
+  hooks: {
+    workoutRoutineName: 'Workouts',
   },
 
   keyDates: {

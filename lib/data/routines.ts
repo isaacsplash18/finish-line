@@ -343,3 +343,31 @@ async function clearSabbathElsewhereInWeek(routineId: UUID, date: DateKey): Prom
     .lte('date', weekEnd)
     .neq('date', date);
 }
+
+/* ================================================================== */
+/* v2 — workout hook (SPEC-V2 §8)                                     */
+/* ================================================================== */
+
+/**
+ * The routine `POST /api/v1/hooks/workout` ticks: the active routine named
+ * `config.hooks.workoutRoutineName` ("Workouts"), case-insensitive.
+ */
+export async function getWorkoutRoutine(): Promise<Routine | null> {
+  const wanted = config.hooks.workoutRoutineName.trim().toLowerCase();
+  const routines = await fetchRoutines(false);
+  return routines.find((r) => r.name.trim().toLowerCase() === wanted) ?? null;
+}
+
+/**
+ * Increment TODAY's Workouts count by one — the only thing the workout hook
+ * can do. No date, routine or count is taken from the caller.
+ */
+export async function logWorkoutFromHook(): Promise<{
+  routine: Pick<Routine, 'id' | 'name'>;
+  check: RoutineCheck;
+}> {
+  const routine = await getWorkoutRoutine();
+  if (!routine) throw new NotFoundError(`Routine "${config.hooks.workoutRoutineName}"`);
+  const check = await incrementRoutine(routine.id, today(), 1);
+  return { routine: { id: routine.id, name: routine.name }, check };
+}

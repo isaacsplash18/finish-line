@@ -31,7 +31,7 @@ export function ClaimRewardButton({ rewardId }: ClaimRewardButtonProps) {
       >
         Claim
       </Button>
-      {error && <span className="max-w-[10rem] text-right text-xs text-danger">{error}</span>}
+      {error && <span className="max-w-[10rem] text-right text-xs text-warn">{error}</span>}
     </div>
   );
 }

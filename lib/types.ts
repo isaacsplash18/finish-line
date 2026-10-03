@@ -1,8 +1,8 @@
 /**
  * Finish Line — the whole data model, in one file.
  *
- * Mirrors `supabase/migrations/0001_init.sql` exactly. If you change one,
- * change the other. PRD §9.
+ * Mirrors `supabase/migrations/0001_init.sql` + `0002_v2.sql` exactly. If you
+ * change one, change the other. PRD §9, SPEC-V2 §9.
  *
  * Naming convention: DB rows use snake_case (they come straight out of
  * Postgres); everything derived / computed in TypeScript uses camelCase.
@@ -70,6 +70,24 @@ export type RoutineCadence = 'daily' | 'weekly';
 export const ROUTINE_CADENCES: readonly RoutineCadence[] = ['daily', 'weekly'];
 
 /**
+ * SPEC-V2 §5. A `project` is finishable and scored. An `area` is an ongoing
+ * venture (Splash Advisory, Soycraft, Life Church): it holds a next action and
+ * sits in Today's-move rotation, but is exempt from the WIP cap, stuck,
+ * activation charges, the kanban and every score.
+ */
+export type ProjectKind = 'project' | 'area';
+
+export const PROJECT_KINDS: readonly ProjectKind[] = ['project', 'area'];
+
+/** SPEC-V2 §2 — the four progress signals. */
+export type ProgressKind = 'did_it' | 'commit' | 'next_action' | 'stage';
+
+export const PROGRESS_KINDS: readonly ProgressKind[] = ['did_it', 'commit', 'next_action', 'stage'];
+
+/** SPEC-V2 §1 — what happened to a project on the Today's-move card. */
+export type MoveOutcome = 'did_it' | 'skipped';
+
+/**
  * An ISO date with no time component, `YYYY-MM-DD`.
  * Everything day-shaped in this app (routine checks, key dates, score
  * snapshots) uses this, resolved in the app timezone (`config.timezone`).
@@ -112,6 +130,14 @@ export type Project = {
   next_action_updated_at: Timestamp;
   /** Required reason when killing (PRD §3.2.3); optional note when abandoning. */
   terminal_reason: string | null;
+  /**
+   * v2 (0002_v2.sql). Defaults to 'project'. Read it through `projectKindOf()`
+   * (lib/scores.ts), which also treats a pre-migration row without the column
+   * as a project.
+   */
+  kind: ProjectKind;
+  /** v2: GitHub "owner/name"; commits on it count as progress (SPEC-V2 §6). */
+  github_repo: string | null;
   created_at: Timestamp;
   updated_at: Timestamp;
 };
@@ -203,6 +229,41 @@ export type ScoreSnapshot = {
   created_at: Timestamp;
 };
 
+/** v2 `progress_events` — one row per project per kind per SGT day (unique). */
+export type ProgressEvent = {
+  id: UUID;
+  project_id: UUID;
+  kind: ProgressKind;
+  day: DateKey;
+  created_at: Timestamp;
+};
+
+/** v2 `reviews` — the Sunday review, one row per ISO week (Monday `week_start`). */
+export type Review = {
+  id: UUID;
+  week_start: DateKey;
+  /** Null ⇒ started but not completed (the banner still shows). */
+  completed_at: Timestamp | null;
+  created_at: Timestamp;
+};
+
+/** v2 `seasons` — the latest row is the current season. */
+export type Season = {
+  id: UUID;
+  started_at: Timestamp;
+  name: string | null;
+};
+
+/** v2 `daily_moves` — Today's-move outcomes, unique per (day, project). */
+export type DailyMove = {
+  id: UUID;
+  day: DateKey;
+  project_id: UUID;
+  outcome: MoveOutcome;
+  created_at: Timestamp;
+  updated_at: Timestamp;
+};
+
 /* ================================================================== */
 /* Write payloads                                                     */
 /* ================================================================== */
@@ -215,6 +276,10 @@ export interface CreateProjectInput {
   /** Defaults to `idea`. Creating straight into an active stage respects the WIP limit. */
   stage?: ProjectStage;
   stage_target_date?: DateKey | null;
+  /** v2. Defaults to 'project' (DB default). */
+  kind?: ProjectKind;
+  /** v2. "owner/name" or a github.com URL; normalised by `setProjectRepo`. */
+  github_repo?: string | null;
 }
 
 export interface UpdateProjectInput {
@@ -295,7 +360,7 @@ export interface UpdateKeyDateInput {
 export interface ProjectWithMeta extends Project {
   /** `stuck_since !== null` */
   isStuck: boolean;
-  /** `stage` is building or commercialising. */
+  /** `stage` is building or commercialising AND kind is 'project' (areas never count). */
   isActive: boolean;
   /** `stage` is done / killed / abandoned. */
   isTerminal: boolean;
@@ -332,20 +397,182 @@ export interface RoutineWithChecks extends Routine {
   windowCount: number;
 }
 
+/* ------------------------------------------------------------------ */
+/* v2 derived types                                                    */
+/* ------------------------------------------------------------------ */
+
+/** The "state the price up front" copy for any move into an active stage. */
+export interface WipCostPreview {
+  /** How many Active projects there would be after the move. */
+  activeCountAfter: number;
+  cap: number;
+  /** How far over the cap the move leaves you. 0 when at or under. */
+  overBy: number;
+  /** 'under' | 'at' | 'over' — drives the WIP counter colour. */
+  level: 'under' | 'at' | 'over';
+  /** One-line price tag to show at the moment of action. Empty when free. */
+  copy: string;
+}
+
+/** One kind of Focus delta. `computeFocusWeek` always returns all seven. */
+export type FocusDeltaType =
+  | 'activation'
+  | 'overCap'
+  | 'stuck'
+  | 'abandoned'
+  | 'done'
+  | 'decisiveKill'
+  | 'didIt';
+
+export interface FocusWeekLine {
+  type: FocusDeltaType;
+  /** Human label, e.g. "Started over cap". */
+  label: string;
+  /** How many times it applied this week (project-days for overCap, taps for didIt). */
+  count: number;
+  /** Points per unit from config (didIt is also capped per day). */
+  perUnit: number;
+  /** Signed points this line contributed. */
+  points: number;
+}
+
+/** SPEC-V2 §3 — this week's Focus, with the working. */
+export interface FocusWeekBreakdown {
+  /** 0–100, clamped. */
+  score: number;
+  /** Unclamped total, for a "why is it 0?" panel. */
+  raw: number;
+  /** Where the week started (100). */
+  base: number;
+  /** Monday (SGT) of the week. */
+  weekStart: DateKey;
+  /** Sunday (SGT) of the week. */
+  weekEnd: DateKey;
+  /** The day the score is "as of" (today, or weekEnd for a past week). */
+  asOf: DateKey;
+  /**
+   * Daily charges (over cap, stuck) land at the close of each day. This is the
+   * last day that has closed and been charged; null on Monday morning.
+   */
+  chargedThrough: DateKey | null;
+  /** One line per delta type, in a fixed order. */
+  lines: FocusWeekLine[];
+  /** Same numbers keyed by type. */
+  deltas: Record<FocusDeltaType, number>;
+  /**
+   * What will land at tonight's close if nothing changes (still over cap,
+   * still stuck). Not part of `score`. Zero for a past week.
+   */
+  pending: { overCap: number; stuck: number; stuckProjectIds: UUID[]; overBy: number };
+  /** Distinct charged days on which the portfolio was over cap. */
+  overCapDays: number;
+  /** Projects charged the weekly stuck penalty this week. */
+  stuckProjectIds: UUID[];
+}
+
+/** Up-only counters (SPEC-V2 §3). */
+export interface Counters {
+  /** Projects moved to Done. */
+  finished: number;
+  /** Decisive kills — killed after reaching Building or beyond. */
+  decisiveKills: number;
+  /** Distinct days with at least one Did-it tap. */
+  didItDays: number;
+  /** Completed weeks in which the portfolio was never over cap at a day's close. */
+  weeksUnderCap: number;
+}
+
+export interface CountersSummary {
+  season: Counters;
+  lifetime: Counters;
+  /** Day the current season started (SGT), or null if there is no season row. */
+  seasonStart: DateKey | null;
+}
+
+/** A project as the Today's-move card needs it. */
+export interface TodaysMoveProject {
+  id: UUID;
+  name: string;
+  kind: ProjectKind;
+  stage: ProjectStage;
+  next_action: string;
+  stage_target_date: DateKey | null;
+  stuck_since: DateKey | null;
+  isStuck: boolean;
+  daysInStage: number;
+  /** Whole days until the target date; negative = overdue; null if unset. */
+  daysToTarget: number | null;
+  /** Last day with any progress signal (SGT). */
+  lastProgressDay: DateKey;
+  daysSinceProgress: number;
+}
+
+/** Why this project won the card: the first ordering criterion that decided it. */
+export type TodaysMoveReason = 'stuck' | 'target' | 'idle' | 'rotation';
+
+/** SPEC-V2 §1 — the one card on the home screen. */
+export type TodaysMove =
+  | {
+      status: 'move';
+      project: TodaysMoveProject;
+      reason: TodaysMoveReason;
+      /** The rest of today's rotation, in order — the client can advance optimistically. */
+      upNext: TodaysMoveProject[];
+      doneToday: number;
+      skippedToday: number;
+    }
+  | {
+      /** Every active project/area has been done or skipped today. */
+      status: 'all_done';
+      doneToday: number;
+      skippedToday: number;
+      copy: string;
+    }
+  | {
+      /** Nothing active: offer the top Idea, with the price of starting it. */
+      status: 'start_idea';
+      project: TodaysMoveProject;
+      cost: WipCostPreview;
+      copy: string;
+    }
+  | { status: 'empty'; copy: string };
+
+/** Review banner state for the home screen (SPEC-V2 §4). */
+export interface ReviewDue {
+  /** The Monday of the week under review. */
+  weekStart: DateKey;
+  /** True on banner days (Sun/Mon) until that week's review is completed. */
+  due: boolean;
+  completedAt: Timestamp | null;
+}
+
 /** Everything the dashboard needs, in one object. */
 export interface DashboardData {
+  /** Live Flow over the rolling 7 days (v2: not the snapshot). */
   flow: number;
+  /** Live Focus for this week (v2: `focusWeek.score`). */
   focus: number;
+  /** 30 days of nightly snapshots, oldest first — sparklines only. */
   snapshots: ScoreSnapshot[];
   routines: RoutineWithChecks[];
+  /** Building + Commercialising, kind='project' only. */
   activeProjects: ProjectWithMeta[];
   stuckProjects: ProjectWithMeta[];
   keyDates: KeyDateWithCountdown[];
   rewards: Reward[];
-  /** True when any project is Stuck ⇒ unclaimed rewards are locked (PRD §4.3.1). */
+  /** v2: true only while the portfolio is over the soft cap (stuck no longer locks). */
   rewardsLocked: boolean;
   activeCount: number;
   wipLimit: number;
+
+  /* ---- v2 ---- */
+  todaysMove: TodaysMove;
+  focusWeek: FocusWeekBreakdown;
+  counters: CountersSummary;
+  reviewDue: ReviewDue;
+  season: Season | null;
+  /** Non-terminal areas ("Ongoing" strip). */
+  areas: ProjectWithMeta[];
 }
 
 /* ================================================================== */
@@ -402,6 +629,30 @@ export interface Database {
         Row: ScoreSnapshot;
         Insert: Insertable<ScoreSnapshot, 'date' | 'flow' | 'focus', 'id' | 'created_at'>;
         Update: Partial<ScoreSnapshot>;
+        Relationships: [];
+      };
+      progress_events: {
+        Row: ProgressEvent;
+        Insert: Insertable<ProgressEvent, 'project_id' | 'kind' | 'day', 'id' | 'created_at'>;
+        Update: Partial<ProgressEvent>;
+        Relationships: [];
+      };
+      reviews: {
+        Row: Review;
+        Insert: Insertable<Review, 'week_start', 'id' | 'created_at'>;
+        Update: Partial<Review>;
+        Relationships: [];
+      };
+      seasons: {
+        Row: Season;
+        Insert: Insertable<Season, never, 'id' | 'started_at'>;
+        Update: Partial<Season>;
+        Relationships: [];
+      };
+      daily_moves: {
+        Row: DailyMove;
+        Insert: Insertable<DailyMove, 'day' | 'project_id' | 'outcome', 'id' | 'created_at' | 'updated_at'>;
+        Update: Partial<DailyMove>;
         Relationships: [];
       };
     };

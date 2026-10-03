@@ -16,3 +16,9 @@ export * from './routines';
 export * from './key-dates';
 export * from './scores';
 export * from './dashboard';
+// v2 (SPEC-V2.md)
+export * from './progress-events';
+export * from './moves';
+export * from './reviews';
+export * from './seasons';
+export * from './github';

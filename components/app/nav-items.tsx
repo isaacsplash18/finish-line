@@ -20,13 +20,13 @@ const iconProps = {
 };
 
 /**
- * The four top-level screens (PRD §8). Project *detail* is nested under
- * /projects/[id] and does not get its own tab.
+ * The five top-level screens (PRD §8 + SPEC-V2 §4's weekly review). Project
+ * *detail* is nested under /projects/[id] and does not get its own tab.
  */
 export const NAV_ITEMS: NavItem[] = [
   {
     href: '/',
-    label: 'Dashboard',
+    label: 'Today',
     icon: (
       <svg {...iconProps}>
         <path d="M3 13h5v8H3zM9.5 3h5v18h-5zM16 9h5v12h-5z" />
@@ -40,6 +40,16 @@ export const NAV_ITEMS: NavItem[] = [
     icon: (
       <svg {...iconProps}>
         <path d="M4 5h6v14H4zM14 5h6v9h-6z" />
+      </svg>
+    ),
+  },
+  {
+    href: '/review',
+    label: 'Review',
+    icon: (
+      <svg {...iconProps}>
+        <rect x="4" y="5" width="16" height="15" rx="2" />
+        <path d="M4 10h16M9 3v4M15 3v4M8.5 14.5l2 2 4-4" />
       </svg>
     ),
   },

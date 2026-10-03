@@ -15,9 +15,12 @@ import {
   getReward,
   importProject,
   isDomainError,
+  startSeason,
+  syncGithubProgress,
   updateKeyDate,
   updateReward,
   updateRoutine,
+  type GithubSyncResult,
   type RecomputeResult,
 } from '@/lib/data';
 import type {
@@ -28,6 +31,7 @@ import type {
   UpdateKeyDateInput,
   UpdateRewardInput,
   UpdateRoutineInput,
+  Season,
   UUID,
 } from '@/lib/types';
 
@@ -193,4 +197,25 @@ export async function importProjectAction(
  */
 export async function recomputeNowAction(): Promise<SettingsActionResult<RecomputeResult>> {
   return run(() => computeAndSnapshotToday());
+}
+
+/* ------------------------------------------------------------------ */
+/* v2: seasons, GitHub                                                 */
+/* ------------------------------------------------------------------ */
+
+/**
+ * SPEC-V2 §7 — "Start a new season". Counters restart, earlier terminal
+ * projects hide from the board, active projects carry over, history stays.
+ * Needs migration 0002 (`seasons`); before it a DatabaseError message comes back.
+ */
+export async function startSeasonAction(name?: string): Promise<SettingsActionResult<Season>> {
+  return run(() => startSeason(name?.trim() || null));
+}
+
+/**
+ * SPEC-V2 §6 — "Sync now". `syncGithubProgress` never throws (per-repo
+ * statuses), so this just returns its result. The token is never included.
+ */
+export async function syncGithubNowAction(): Promise<SettingsActionResult<GithubSyncResult>> {
+  return run(() => syncGithubProgress());
 }

@@ -22,10 +22,20 @@ import {
   killProject,
   moveProjectStage,
   previewStageMove,
+  setProjectKind,
+  setProjectRepo,
+  syncGithubProgress,
   updateProject,
 } from '@/lib/data';
-import type { WipCostPreview } from '@/lib/scores';
-import type { CreateProjectInput, DateKey, Project, ProjectStage, UUID } from '@/lib/types';
+import type { StageMovePreview } from '@/lib/data';
+import type {
+  CreateProjectInput,
+  DateKey,
+  Project,
+  ProjectKind,
+  ProjectStage,
+  UUID,
+} from '@/lib/types';
 
 export type ActionResult<T = undefined> =
   | { ok: true; data: T }
@@ -52,6 +62,10 @@ export async function createProjectAction(input: {
   next_action: string;
   resolution?: string;
   stage_target_date?: DateKey | null;
+  /** v2: 'project' (default) or 'area' (ongoing, exempt from cap/stuck/scores). */
+  kind?: ProjectKind;
+  /** v2: optional "owner/name" (or github.com URL). */
+  github_repo?: string | null;
 }): Promise<ActionResult<{ id: UUID }>> {
   try {
     const payload: CreateProjectInput = {
@@ -60,6 +74,9 @@ export async function createProjectAction(input: {
       resolution: input.resolution,
       stage_target_date: input.stage_target_date ?? null,
       stage: 'idea',
+      // v2 columns are only sent when asked for, so a pre-migration database still works.
+      ...(input.kind && input.kind !== 'project' ? { kind: input.kind } : {}),
+      ...(input.github_repo?.trim() ? { github_repo: input.github_repo } : {}),
     };
     const project = await createProject(payload);
     revalidateProjectPaths(project.id);
@@ -95,7 +112,7 @@ export async function updateProjectAction(
 export async function previewStageMoveAction(
   id: UUID,
   toStage: ProjectStage,
-): Promise<ActionResult<WipCostPreview & { killBonusCopy: string | null }>> {
+): Promise<ActionResult<StageMovePreview>> {
   try {
     const preview = await previewStageMove(id, toStage);
     return { ok: true, data: preview };
@@ -148,6 +165,80 @@ export async function abandonProjectAction(id: UUID, reason?: string): Promise<A
     await abandonProject(id, reason);
     revalidateProjectPaths(id);
     return { ok: true, data: undefined };
+  } catch (error) {
+    return fail(error);
+  }
+}
+
+/* ------------------------------------------------------------------ */
+/* v2: kind, GitHub                                                    */
+/* ------------------------------------------------------------------ */
+
+/** SPEC-V2 §5 — convert between a finishable project and an ongoing area. */
+export async function setProjectKindAction(id: UUID, kind: ProjectKind): Promise<ActionResult> {
+  try {
+    await setProjectKind(id, kind);
+    revalidateProjectPaths(id);
+    return { ok: true, data: undefined };
+  } catch (error) {
+    return fail(error);
+  }
+}
+
+/** SPEC-V2 §6 — link (or unlink with null/blank) a GitHub repo. Validation message is returned verbatim. */
+export async function setProjectRepoAction(
+  id: UUID,
+  repo: string | null,
+): Promise<ActionResult<{ repo: string | null }>> {
+  try {
+    const project = await setProjectRepo(id, repo);
+    revalidateProjectPaths(id);
+    return { ok: true, data: { repo: project.github_repo } };
+  } catch (error) {
+    return fail(error);
+  }
+}
+
+export interface ProjectGithubCheck {
+  /** GITHUB_TOKEN configured on the server. */
+  authenticated: boolean;
+  lookbackDays: number;
+  /** All repos synced in this pass (the sync is portfolio-wide). */
+  totalInserted: number;
+  /** This project's own result, or null if it has no repo / was not part of the pass. */
+  repo: {
+    repo: string;
+    status: 'ok' | 'not_found' | 'rate_limited' | 'unauthorized' | 'error';
+    commitDays: number;
+    inserted: number;
+    detail?: string;
+  } | null;
+}
+
+/** "Check commits now" on the detail page. Never throws (the sync degrades per repo). */
+export async function checkGithubNowAction(id: UUID): Promise<ActionResult<ProjectGithubCheck>> {
+  try {
+    const result = await syncGithubProgress();
+    const mine = result.repos.find((r) => r.projectId === id);
+    revalidateProjectPaths(id);
+    revalidatePath('/settings');
+    return {
+      ok: true,
+      data: {
+        authenticated: result.authenticated,
+        lookbackDays: result.lookbackDays,
+        totalInserted: result.inserted,
+        repo: mine
+          ? {
+              repo: mine.repo,
+              status: mine.status,
+              commitDays: mine.commitDays.length,
+              inserted: mine.inserted,
+              ...(mine.detail ? { detail: mine.detail } : {}),
+            }
+          : null,
+      },
+    };
   } catch (error) {
     return fail(error);
   }

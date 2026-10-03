@@ -1,5 +1,6 @@
 import { EmptyState } from '@/components';
 import type { ProjectStage, ProjectWithMeta } from '@/lib/types';
+import { EarlierSeasonToggle } from './EarlierSeasonToggle';
 import { ProjectCard } from './ProjectCard';
 
 interface Column {
@@ -24,7 +25,13 @@ const COLUMNS: readonly Column[] = [
 ];
 
 export interface KanbanBoardProps {
+  /** kind='project' rows only (areas have their own strip), already season-filtered. */
   projects: ProjectWithMeta[];
+  /**
+   * Terminal projects that ended before the current season started. Hidden
+   * behind a "Show N from earlier seasons" toggle in the Done / Killed column.
+   */
+  earlierSeasons?: ProjectWithMeta[];
 }
 
 /**
@@ -32,7 +39,7 @@ export interface KanbanBoardProps {
  * At `lg`+ it becomes a fixed 5-column grid with no scrolling needed —
  * project reviews happen at a desk (PRD §10.1).
  */
-export function KanbanBoard({ projects }: KanbanBoardProps) {
+export function KanbanBoard({ projects, earlierSeasons = [] }: KanbanBoardProps) {
   const byStage = new Map<ProjectStage, ProjectWithMeta[]>();
   for (const project of projects) {
     const list = byStage.get(project.stage) ?? [];
@@ -42,10 +49,11 @@ export function KanbanBoard({ projects }: KanbanBoardProps) {
 
   return (
     <div
-      className="flex snap-x snap-mandatory gap-4 overflow-x-auto px-4 pb-4 pt-1 lg:snap-none lg:px-8"
+      className="flex snap-x snap-mandatory scroll-px-4 gap-4 overflow-x-auto px-4 pb-4 pt-1 lg:snap-none lg:scroll-px-8 lg:px-8"
     >
       {COLUMNS.map((column) => {
         const items = column.stages.flatMap((stage) => byStage.get(stage) ?? []);
+        const earlier = column.key === 'terminal' ? earlierSeasons : [];
         return (
           <section
             key={column.key}
@@ -66,6 +74,13 @@ export function KanbanBoard({ projects }: KanbanBoardProps) {
                 </li>
               ) : (
                 items.map((project) => <ProjectCard key={project.id} project={project} />)
+              )}
+              {earlier.length > 0 && (
+                <EarlierSeasonToggle count={earlier.length}>
+                  {earlier.map((project) => (
+                    <ProjectCard key={project.id} project={project} />
+                  ))}
+                </EarlierSeasonToggle>
               )}
             </ul>
           </section>

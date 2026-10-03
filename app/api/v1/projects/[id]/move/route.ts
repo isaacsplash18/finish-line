@@ -14,9 +14,8 @@ type Params = { id: string };
  * priced. Returns the project's new state plus the cost preview that applied
  * at the moment of the move (computed by `previewStageMove` just before it).
  *
- * `focus` spells out what the move means for the Focus score. Scores are
- * snapshotted, not live: the change shows up on the next recompute
- * (`POST /api/v1/scores/recompute`, the Settings button, or the nightly cron).
+ * `focus` spells out what the move means for this week's Focus, which is
+ * computed live (v2): `GET /api/v1/focus/week` reflects it immediately.
  */
 export const POST = withApi<Params>(async (request, params) => {
   const id = parseId(params.id);
@@ -33,12 +32,14 @@ export const POST = withApi<Params>(async (request, params) => {
   const project = await getProjectOrThrow(id);
 
   const changed = before.stage !== project.stage;
-  const isNewBuild = changed && body.toStage === 'building' && before.stage === 'idea';
+  // v2: starting something is only charged when it lands over the cap; areas
+  // never pay (previewStageMove already reports isActivation=false for them).
+  const isActivation = changed && costPreview.isActivation;
   const immediateDelta = !changed
     ? 0
-    : isNewBuild
-      ? config.focus.newBuildingPenalty
-      : body.toStage === 'done'
+    : isActivation && costPreview.overBy > 0
+      ? config.focus.activationOverCapPenalty
+      : body.toStage === 'done' && before.kind !== 'area'
         ? config.focus.doneBonus
         : 0;
 
@@ -53,7 +54,8 @@ export const POST = withApi<Params>(async (request, params) => {
       dailyBleedWhileOverCap: costPreview.overBy * config.focus.overCapPenaltyPerProjectPerDay,
       /** Over cap ⇒ unclaimed rewards are locked (SPEC-CHANGES §3). */
       overCap: costPreview.overBy > 0,
-      appliesOnNextRecompute: true,
+      /** v2: Focus is live — this is already in GET /focus/week. */
+      appliesOnNextRecompute: false,
     },
   };
 });

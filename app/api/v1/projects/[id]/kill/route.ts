@@ -26,8 +26,9 @@ export const POST = withApi<Params>(async (request, params) => {
     fromStage: before.stage,
     killBonus: bonusCopy,
     focus: {
-      immediateDelta: bonusCopy ? config.focus.decisiveKillBonus : 0,
-      appliesOnNextRecompute: true,
+      // Areas are never scored (SPEC-V2 §5).
+      immediateDelta: bonusCopy && before.kind !== 'area' ? config.focus.decisiveKillBonus : 0,
+      appliesOnNextRecompute: false,
     },
   };
 });

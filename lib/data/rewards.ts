@@ -2,15 +2,9 @@ import 'server-only';
 
 import { cache } from 'react';
 
-import { config } from '@/lib/config';
+import { rewardGate } from '@/lib/scores';
 import { getSupabaseServerClient } from '@/lib/supabase/server';
-import type {
-  CreateRewardInput,
-  ProjectStage,
-  Reward,
-  UpdateRewardInput,
-  UUID,
-} from '@/lib/types';
+import type { CreateRewardInput, ProjectKind, Reward, UpdateRewardInput, UUID } from '@/lib/types';
 
 import { DatabaseError, NotFoundError, ValidationError, requireText, unwrap, unwrapNullable } from './errors';
 
@@ -106,7 +100,7 @@ export async function claimReward(id: UUID): Promise<Reward> {
     throw new ValidationError(
       reward.status === 'forfeited'
         ? 'That reward is gone. You abandoned the project it was attached to.'
-        : 'That reward is locked. Finish the project — and unstick everything else — first.',
+        : 'That reward is locked. Finish the project and get back under the cap first.',
     );
   }
 
@@ -139,25 +133,21 @@ export async function forfeitReward(id: UUID): Promise<Reward> {
  * Pure: is the reward gate shut for this portfolio? Shared by
  * `applyRewardLockingRule` (which writes) and the dashboard (which only reads
  * and so never needs to touch the DB to answer "locked?").
+ *
+ * SPEC-V2 §3: locked ONLY while over the soft cap. Areas never count.
  */
 export function computeRewardGate(
-  projects: readonly { stage: string; stuck_since: string | null }[],
+  projects: readonly { stage: string; stuck_since: string | null; kind?: ProjectKind | null }[],
 ): { locked: boolean; hasStuckProject: boolean; isOverCap: boolean; activeCount: number; cap: number } {
-  const hasStuckProject = projects.some((p) => p.stuck_since !== null);
-  const activeCount = projects.filter((p) =>
-    config.projects.activeStages.includes(p.stage as ProjectStage),
-  ).length;
-  const cap = config.projects.wipLimit;
-  const isOverCap = activeCount > cap;
-  return { locked: hasStuckProject || isOverCap, hasStuckProject, isOverCap, activeCount, cap };
+  return rewardGate(projects);
 }
 
 export interface RewardLockResult {
   /** True when unclaimed rewards are currently locked. */
   locked: boolean;
-  /** Why: any project Stuck (PRD §4.3.1). */
+  /** Informational only — v2 no longer locks rewards for stuck projects. */
   hasStuckProject: boolean;
-  /** Why: portfolio over the soft WIP cap (SPEC-CHANGES §3). */
+  /** Why: portfolio over the soft WIP cap — the only lock reason in v2. */
   isOverCap: boolean;
   activeCount: number;
   cap: number;
@@ -168,9 +158,9 @@ export interface RewardLockResult {
 /**
  * The global reward gate.
  *
- * PRD §4.3.1 as amended by SPEC-CHANGES §3: unclaimed rewards lock while ANY
- * project is Stuck **or** the portfolio is over the WIP cap. They unlock when
- * nothing is stuck AND the portfolio is back at or under cap.
+ * SPEC-V2 §3: unclaimed rewards lock only while the portfolio is over the soft
+ * WIP cap (kind='project' rows only). Stuck no longer locks — the Sunday review
+ * deals with stuck projects.
  *
  * A reward is `claimable` only when its project is Done and the gate is open.
  * `claimed` and `forfeited` are terminal and never touched here.
@@ -182,7 +172,9 @@ export async function applyRewardLockingRule(): Promise<RewardLockResult> {
   const supabase = await getSupabaseServerClient();
 
   const [projectsRes, rewardsRes] = await Promise.all([
-    supabase.from('projects').select('id, stage, stuck_since'),
+    // `*` rather than a column list so this works before and after migration
+    // 0002 (which adds `kind`).
+    supabase.from('projects').select('*'),
     supabase.from('rewards').select('*').in('status', ['locked_pending', 'claimable']),
   ]);
   const projects = unwrap(projectsRes, 'applyRewardLockingRule:projects');

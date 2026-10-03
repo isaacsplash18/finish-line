@@ -4,6 +4,7 @@ import { cache } from 'react';
 
 import { config } from '@/lib/config';
 import { daysBetween, daysSince, today, toDateKey } from '@/lib/dates';
+import { normalizeGithubRepo } from '@/lib/github';
 import { getSupabaseServerClient } from '@/lib/supabase/server';
 import type {
   CreateProjectInput,
@@ -12,18 +13,27 @@ import type {
   KeyDate,
   Project,
   ProjectDetail,
+  ProjectKind,
   ProjectStage,
   ProjectWithMeta,
   Reward,
   StageEvent,
+  Timestamp,
   UpdateProjectInput,
   UUID,
 } from '@/lib/types';
+import { PROJECT_KINDS } from '@/lib/types';
 
 import {
   IMPORT_EVENT_MARKER,
+  countActiveProjects,
   describeActivationCost,
+  describeStageMoveCost,
   describeKillBonus,
+  isArea,
+  isVisibleInSeason,
+  projectKindOf,
+  stuckSince,
   type WipCostPreview,
 } from '@/lib/scores';
 
@@ -32,10 +42,12 @@ import {
   InvalidTransitionError,
   NotFoundError,
   ValidationError,
+  fetchAllRows,
   requireText,
   unwrap,
   unwrapNullable,
 } from './errors';
+import { fetchProgressEventsSince, progressLookbackStart, recordProgress } from './progress-events';
 import { applyRewardLockingRule, getRewards } from './rewards';
 
 /* ================================================================== */
@@ -48,6 +60,14 @@ export function isActiveStage(stage: ProjectStage): boolean {
 
 export function isTerminalStage(stage: ProjectStage): boolean {
   return config.projects.terminalStages.includes(stage);
+}
+
+/**
+ * v2: counts toward WIP — an active stage AND kind='project'. Areas never do
+ * (SPEC-V2 §5).
+ */
+export function isActiveProject(project: Pick<Project, 'stage'> & { kind?: ProjectKind | null }): boolean {
+  return !isArea(project) && isActiveStage(project.stage);
 }
 
 /** Decorate a raw row with everything the UI needs. Pure — safe to reuse. */
@@ -63,8 +83,11 @@ export function toProjectWithMeta(
 
   return {
     ...project,
-    isStuck: project.stuck_since !== null,
-    isActive: isActiveStage(project.stage),
+    // Rows read before migration 0002 have no kind/github_repo — default them.
+    kind: projectKindOf(project),
+    github_repo: project.github_repo ?? null,
+    isStuck: !isArea(project) && project.stuck_since !== null,
+    isActive: isActiveProject(project),
     isTerminal: isTerminalStage(project.stage),
     daysInStage: daysSince(project.stage_changed_at, asOf),
     daysIdle: daysSince(idleFrom, asOf),
@@ -92,6 +115,13 @@ export interface GetProjectsOptions {
   includeTerminal?: boolean;
   /** Only projects currently flagged Stuck. */
   onlyStuck?: boolean;
+  /** v2: restrict to these kinds. Defaults to both. */
+  kinds?: readonly ProjectKind[];
+  /**
+   * v2 §7: hide terminal projects that ended before this season start (the
+   * board's default once a new season starts). Omit to show everything.
+   */
+  seasonStartedAt?: Timestamp | null;
 }
 
 /**
@@ -132,7 +162,9 @@ export function buildProjects(
       } else if (options.includeTerminal === false && isTerminalStage(p.stage)) {
         return false;
       }
-      if (options.onlyStuck && p.stuck_since === null) return false;
+      if (options.onlyStuck && (p.stuck_since === null || isArea(p))) return false;
+      if (options.kinds?.length && !options.kinds.includes(projectKindOf(p))) return false;
+      if (options.seasonStartedAt && !isVisibleInSeason(p, options.seasonStartedAt)) return false;
       return true;
     })
     .map((p) => toProjectWithMeta(p, rewardByProject.get(p.id) ?? null, asOf))
@@ -151,20 +183,22 @@ export async function getProjects(options: GetProjectsOptions = {}): Promise<Pro
   return buildProjects(rows, rewards, options);
 }
 
-/** Convenience: the Building + Commercialising projects (PRD "Active"). */
+/** Convenience: the Building + Commercialising projects (PRD "Active"). Areas excluded. */
 export async function getActiveProjects(): Promise<ProjectWithMeta[]> {
-  return getProjects({ stages: config.projects.activeStages });
+  return getProjects({ stages: config.projects.activeStages, kinds: ['project'] });
 }
 
-/** PRD §3.2.1 — how many of the 3 slots are taken. */
+/** How many of the 3 slots are taken. Uncached (used right before writes). Areas never count. */
 export async function getActiveProjectCount(): Promise<number> {
   const supabase = await getSupabaseServerClient();
-  const { count, error } = await supabase
-    .from('projects')
-    .select('id', { count: 'exact', head: true })
-    .in('stage', config.projects.activeStages as ProjectStage[]);
-  if (error) throw new NotFoundError('projects');
-  return count ?? 0;
+  const rows = unwrap(
+    await supabase
+      .from('projects')
+      .select('*')
+      .in('stage', config.projects.activeStages as ProjectStage[]),
+    'getActiveProjectCount',
+  );
+  return countActiveProjects(rows);
 }
 
 export interface WipStatus {
@@ -195,7 +229,7 @@ export function computeWipStatus(projects: readonly Project[]): WipStatus {
   // Same ordering `getActiveProjects()` always gave: stuck first, then most idle.
   const asOf = today();
   const active = projects
-    .filter((p) => isActiveStage(p.stage))
+    .filter((p) => isActiveProject(p))
     .map((p) => toProjectWithMeta(p, null, asOf))
     .sort(byUrgency);
   const cap = config.projects.wipLimit;
@@ -225,6 +259,13 @@ export async function getWipStatus(projects?: readonly Project[]): Promise<WipSt
   return computeWipStatus(projects ?? (await getAllProjectRows()));
 }
 
+/** `previewStageMove`'s result: the price tag plus the kill-bonus line. */
+export type StageMovePreview = WipCostPreview & {
+  /** True only for a start (Idea/creation → active) — the only move the −15 can apply to. */
+  isActivation: boolean;
+  killBonusCopy: string | null;
+};
+
 /**
  * SPEC-CHANGES §1/§4 — what a specific stage move will cost, for the
  * confirmation copy. Never blocks; the caller always gets a preview and can
@@ -233,7 +274,7 @@ export async function getWipStatus(projects?: readonly Project[]): Promise<WipSt
 export async function previewStageMove(
   id: UUID,
   toStage: ProjectStage,
-): Promise<WipCostPreview & { killBonusCopy: string | null }> {
+): Promise<StageMovePreview> {
   const supabase = await getSupabaseServerClient();
   const project = unwrapNullable(
     await supabase.from('projects').select('*').eq('id', id).maybeSingle(),
@@ -242,18 +283,22 @@ export async function previewStageMove(
   if (!project) throw new NotFoundError('Project', id);
 
   const activeCount = await getActiveProjectCount();
-  const becomesActive = isActiveStage(toStage) && !isActiveStage(project.stage);
-  const leavesActive = !isActiveStage(toStage) && isActiveStage(project.stage);
-  const after = activeCount + (becomesActive ? 1 : 0) - (leavesActive ? 1 : 0);
+  const killBonusCopy = toStage === 'killed' ? describeKillBonus(project.stage) : null;
 
-  // −15 only applies to a *new* build start (from Idea), not to coming back
-  // from Shipped/Commercialising.
-  const isNewBuild = toStage === 'building' && project.stage === 'idea';
+  // Areas are exempt from the cap and from activation charges (SPEC-V2 §5).
+  if (isArea(project)) {
+    return {
+      ...describeActivationCost(activeCount, {}),
+      copy: '',
+      isActivation: false,
+      killBonusCopy,
+    };
+  }
 
-  return {
-    ...describeActivationCost(after, { isNewBuild }),
-    killBonusCopy: toStage === 'killed' ? describeKillBonus(project.stage) : null,
-  };
+  // Only a start (Idea → active) can carry the −15; any other move — e.g. the
+  // Shipped → Commercialising last mile — says "no activation charge" and only
+  // mentions the bleed if it adds an active project over the cap.
+  return { ...describeStageMoveCost(project.stage, toStage, activeCount), killBonusCopy };
 }
 
 /**
@@ -330,6 +375,12 @@ export async function createProject(input: CreateProjectInput): Promise<ProjectW
     throw new ValidationError('You cannot create a project that is already finished.', 'stage');
   }
 
+  // v2 columns are only sent when asked for, so v1 callers keep working
+  // against a database that has not had migration 0002 applied yet.
+  const v2: Partial<Pick<Project, 'kind' | 'github_repo'>> = {};
+  if (input.kind !== undefined) v2.kind = parseKind(input.kind);
+  if (input.github_repo !== undefined) v2.github_repo = parseRepo(input.github_repo);
+
   const now = new Date().toISOString();
   const project = unwrap(
     await supabase
@@ -342,21 +393,25 @@ export async function createProject(input: CreateProjectInput): Promise<ProjectW
         stage_target_date: input.stage_target_date ?? null,
         stage_changed_at: now,
         next_action_updated_at: now,
+        ...v2,
       })
       .select('*')
       .single(),
     'createProject',
   );
 
-  await supabase.from('stage_events').insert({
-    project_id: project.id,
-    from_stage: null,
-    to_stage: stage,
-    note: 'Created',
-  });
+  await Promise.all([
+    supabase.from('stage_events').insert({
+      project_id: project.id,
+      from_stage: null,
+      to_stage: stage,
+      note: 'Created',
+    }),
+    recordProgress(project.id, 'stage', today(), { bestEffort: true }),
+  ]);
 
   // Going over cap locks unclaimed rewards from that moment (SPEC-CHANGES §3).
-  if (isActiveStage(stage)) await applyRewardLockingRule();
+  if (isActiveProject(project)) await applyRewardLockingRule();
 
   return toProjectWithMeta(project);
 }
@@ -442,12 +497,15 @@ export async function importProject(input: ImportProjectInput): Promise<ProjectW
 
   // `created_at` is left to the DB default (`now()`) — deliberately NOT
   // backdated. See the doc comment above and `countOverCapProjectDays`.
-  await supabase.from('stage_events').insert({
-    project_id: project.id,
-    from_stage: null,
-    to_stage: input.stage,
-    note: `${IMPORT_EVENT_MARKER} pre-existing project, started ${startedAt}`,
-  });
+  await Promise.all([
+    supabase.from('stage_events').insert({
+      project_id: project.id,
+      from_stage: null,
+      to_stage: input.stage,
+      note: `${IMPORT_EVENT_MARKER} pre-existing project, started ${startedAt}`,
+    }),
+    recordProgress(project.id, 'stage', today(), { bestEffort: true }),
+  ]);
 
   // Going over cap locks unclaimed rewards from that moment (SPEC-CHANGES §3).
   if (isActiveStage(input.stage)) await applyRewardLockingRule();
@@ -457,8 +515,9 @@ export async function importProject(input: ImportProjectInput): Promise<ProjectW
 
 /**
  * Edit name / resolution / next action / target date.
- * Touching `next_action` resets the staleness clock (PRD §3.1.5) and, if the
- * project was Stuck for idleness, un-sticks it.
+ * Touching `next_action` is a progress signal (SPEC-V2 §2): it resets the
+ * staleness clock, records `progress_events(kind='next_action')` and clears
+ * Stuck instantly.
  */
 export async function updateProject(
   id: UUID,
@@ -481,12 +540,13 @@ export async function updateProject(
   }
   if (Object.keys(patch).length === 0) return (await getProjectOrThrow(id)) as ProjectWithMeta;
 
-  const project = unwrap(
-    await supabase.from('projects').update(patch).eq('id', id).select('*').single(),
-    'updateProject',
-  );
-
-  if (patch.stuck_since === null) await applyRewardLockingRule();
+  const [result] = await Promise.all([
+    supabase.from('projects').update(patch).eq('id', id).select('*').single(),
+    patch.next_action !== undefined
+      ? recordProgress(id, 'next_action', today(), { bestEffort: true })
+      : null,
+  ]);
+  const project = unwrap(result, 'updateProject');
   return toProjectWithMeta(project);
 }
 
@@ -560,12 +620,16 @@ export async function moveProjectStage(
     'moveProjectStage:update',
   );
 
-  await supabase.from('stage_events').insert({
-    project_id: id,
-    from_stage: current.stage,
-    to_stage: toStage,
-    note: options.note?.trim() || options.terminalReason?.trim() || null,
-  });
+  await Promise.all([
+    supabase.from('stage_events').insert({
+      project_id: id,
+      from_stage: current.stage,
+      to_stage: toStage,
+      note: options.note?.trim() || options.terminalReason?.trim() || null,
+    }),
+    // A stage change is a progress signal (SPEC-V2 §2).
+    recordProgress(id, 'stage', today(), { bestEffort: true }),
+  ]);
 
   // --- reward side effects -------------------------------------------
   if (toStage === 'done') {
@@ -584,7 +648,7 @@ export async function moveProjectStage(
       .in('status', ['locked_pending', 'claimable']);
   }
 
-  // A stage change may have un-stuck the last stuck project — re-run the lock.
+  // A stage change may move the portfolio across the cap — re-run the gate.
   await applyRewardLockingRule();
 
   return toProjectWithMeta(project);
@@ -684,7 +748,81 @@ export async function eraseProject(id: UUID): Promise<EraseProjectResult> {
 }
 
 /* ================================================================== */
-/* Stuck detection (called by the nightly recompute)                  */
+/* v2: kind + GitHub repo (SPEC-V2 §5, §6)                            */
+/* ================================================================== */
+
+function parseKind(kind: unknown): ProjectKind {
+  if (typeof kind !== 'string' || !PROJECT_KINDS.includes(kind as ProjectKind)) {
+    throw new ValidationError("Kind must be 'project' or 'area'.", 'kind');
+  }
+  return kind as ProjectKind;
+}
+
+function parseRepo(repo: unknown): string | null {
+  if (repo === null || (typeof repo === 'string' && repo.trim() === '')) return null;
+  const normalised = normalizeGithubRepo(typeof repo === 'string' ? repo : null);
+  if (!normalised) {
+    throw new ValidationError('GitHub repo must look like owner/name (or a github.com URL).', 'github_repo');
+  }
+  return normalised;
+}
+
+/**
+ * Convert between a finishable project and an ongoing area (SPEC-V2 §5).
+ * Areas are exempt from the cap, stuck and every score, so converting to an
+ * area clears `stuck_since`; the reward gate is re-run because the WIP count
+ * may have changed. Terminal projects cannot be converted.
+ */
+export async function setProjectKind(id: UUID, kind: ProjectKind): Promise<ProjectWithMeta> {
+  const supabase = await getSupabaseServerClient();
+  const next = parseKind(kind);
+
+  const current = unwrapNullable(
+    await supabase.from('projects').select('*').eq('id', id).maybeSingle(),
+    'setProjectKind:load',
+  );
+  if (!current) throw new NotFoundError('Project', id);
+  if (projectKindOf(current) === next) return toProjectWithMeta(current);
+  if (isTerminalStage(current.stage)) {
+    throw new InvalidTransitionError(
+      `"${current.name}" is ${current.stage}. Finished history stays as it was.`,
+    );
+  }
+
+  const patch: Partial<Project> = { kind: next };
+  if (next === 'area') patch.stuck_since = null;
+
+  const project = unwrap(
+    await supabase.from('projects').update(patch).eq('id', id).select('*').single(),
+    'setProjectKind',
+  );
+  await applyRewardLockingRule();
+  return toProjectWithMeta(project);
+}
+
+/**
+ * Link (or unlink with null) a GitHub repo. Accepts "owner/name" or any
+ * github.com URL form; stored normalised as "owner/name". Commits on it become
+ * `progress_events(kind='commit')` on the next sync (SPEC-V2 §6).
+ */
+export async function setProjectRepo(id: UUID, repo: string | null): Promise<ProjectWithMeta> {
+  const supabase = await getSupabaseServerClient();
+  const githubRepo = parseRepo(repo);
+  const project = unwrapNullable(
+    await supabase
+      .from('projects')
+      .update({ github_repo: githubRepo })
+      .eq('id', id)
+      .select('*')
+      .maybeSingle(),
+    'setProjectRepo',
+  );
+  if (!project) throw new NotFoundError('Project', id);
+  return toProjectWithMeta(project);
+}
+
+/* ================================================================== */
+/* Stuck detection — SPEC-V2 §2                                       */
 /* ================================================================== */
 
 export interface StuckRecomputeResult {
@@ -697,39 +835,36 @@ export interface StuckRecomputeResult {
 }
 
 /**
- * Recompute `stuck_since` for every non-terminal project. PRD §3.1.5 + §7.3.
+ * Recompute `stuck_since` for every non-terminal project (SPEC-V2 §2), using
+ * the pure `stuckSince()` from lib/scores.ts. A project is Stuck when EITHER:
  *
- * A project is Stuck when EITHER:
- *  1. it has had no stage change AND no next-action edit for
- *     `config.projects.staleThresholdDays` (14) days — applied only to the
- *     stages in `config.projects.staleStages`, so parked Ideas stay free
- *     (PRD §3.3: "Ideas cost nothing"); or
- *  2. a linked key date has passed and the project is not Done (PRD §7.3) —
- *     this one applies to every non-terminal stage, Ideas included.
+ *  1. it has had no progress signal — stage change, next-action edit, Did-it
+ *     tap, or a commit on its linked repo (`progress_events`, plus the
+ *     `stage_changed_at` / `next_action_updated_at` clocks) — for
+ *     `config.projects.staleThresholdDays` (14) days, in Building / Shipped /
+ *     Commercialising; or
+ *  2. a linked key date has passed, the project is not Done, and there has
+ *     been no progress signal since that date (any non-terminal stage).
  *
- * `stuck_since` is backdated to the day the project actually went stale, so
- * the recurring Focus penalty is correct even if the cron missed a few nights.
+ * Areas are never stuck. Any progress signal clears both rules instantly
+ * (`logProgress` / `updateProject` / `moveProjectStage` also clear the flag
+ * themselves, so nobody waits for this nightly pass to un-stick).
  */
 export async function recomputeStuckFlags(asOf: DateKey = today()): Promise<StuckRecomputeResult> {
   const supabase = await getSupabaseServerClient();
 
-  const [projectsRes, keyDatesRes] = await Promise.all([
+  const [projectsRes, keyDatesRes, progress] = await Promise.all([
     supabase
       .from('projects')
       .select('*')
       .not('stage', 'in', `(${config.projects.terminalStages.join(',')})`),
     supabase.from('key_dates').select('*').not('project_id', 'is', null),
+    fetchProgressEventsSince(progressLookbackStart(asOf)),
   ]);
   const projects = unwrap(projectsRes, 'recomputeStuckFlags:projects');
-  const keyDates = unwrap(keyDatesRes, 'recomputeStuckFlags:keyDates');
-
-  const passedKeyDateByProject = new Map<UUID, DateKey>();
-  for (const kd of keyDates) {
-    if (!kd.project_id) continue;
-    if (kd.date > asOf) continue; // hasn't happened yet
-    const existing = passedKeyDateByProject.get(kd.project_id);
-    if (!existing || kd.date < existing) passedKeyDateByProject.set(kd.project_id, kd.date);
-  }
+  const keyDates = unwrap(keyDatesRes, 'recomputeStuckFlags:keyDates').filter(
+    (kd) => kd.project_id != null,
+  );
 
   const stuckProjectIds: UUID[] = [];
   const newlyStuckProjectIds: UUID[] = [];
@@ -739,29 +874,15 @@ export async function recomputeStuckFlags(asOf: DateKey = today()): Promise<Stuc
   const idsByStuckSince = new Map<DateKey, UUID[]>();
 
   for (const project of projects) {
-    let stuckSince: DateKey | null = null;
+    const since = stuckSince(project, progress, keyDates, asOf);
 
-    // (1) idle too long
-    if (config.projects.staleStages.includes(project.stage)) {
-      const idleFrom =
-        project.next_action_updated_at > project.stage_changed_at
-          ? project.next_action_updated_at
-          : project.stage_changed_at;
-      const wentStaleOn = addDaysToKey(toDateKey(idleFrom), config.projects.staleThresholdDays);
-      if (wentStaleOn <= asOf) stuckSince = wentStaleOn;
-    }
-
-    // (2) a linked key date passed and this is not Done
-    const passedOn = passedKeyDateByProject.get(project.id);
-    if (passedOn && (!stuckSince || passedOn < stuckSince)) stuckSince = passedOn;
-
-    if (stuckSince) {
+    if (since) {
       stuckProjectIds.push(project.id);
-      if (project.stuck_since !== stuckSince) {
+      if (project.stuck_since !== since) {
         if (!project.stuck_since) newlyStuckProjectIds.push(project.id);
-        const ids = idsByStuckSince.get(stuckSince) ?? [];
+        const ids = idsByStuckSince.get(since) ?? [];
         ids.push(project.id);
-        idsByStuckSince.set(stuckSince, ids);
+        idsByStuckSince.set(since, ids);
       }
     } else if (project.stuck_since) {
       unstuckProjectIds.push(project.id);
@@ -769,8 +890,8 @@ export async function recomputeStuckFlags(asOf: DateKey = today()): Promise<Stuc
   }
 
   const writes: PromiseLike<{ error: { message: string } | null }>[] = [];
-  for (const [stuckSince, ids] of idsByStuckSince) {
-    writes.push(supabase.from('projects').update({ stuck_since: stuckSince }).in('id', ids));
+  for (const [since, ids] of idsByStuckSince) {
+    writes.push(supabase.from('projects').update({ stuck_since: since }).in('id', ids));
   }
   if (unstuckProjectIds.length > 0) {
     writes.push(supabase.from('projects').update({ stuck_since: null }).in('id', unstuckProjectIds));
@@ -782,17 +903,22 @@ export async function recomputeStuckFlags(asOf: DateKey = today()): Promise<Stuc
   return { stuckProjectIds, newlyStuckProjectIds, unstuckProjectIds };
 }
 
-function addDaysToKey(key: DateKey, days: number): DateKey {
-  const [y, m, d] = key.split('-').map(Number);
-  const date = new Date(Date.UTC(y, (m ?? 1) - 1, d ?? 1));
-  date.setUTCDate(date.getUTCDate() + days);
-  return date.toISOString().slice(0, 10);
-}
-
-/** Every stage event ever, newest first. Feeds `computeFocusScore`. */
+/**
+ * Every stage event (optionally since a date), NEWEST first, all pages.
+ * Feeds `computeFocusWeek` / `computeCounters`. Uncached — writers and the
+ * recompute job use this.
+ */
 export async function getStageEvents(sinceDate?: DateKey): Promise<StageEvent[]> {
   const supabase = await getSupabaseServerClient();
-  let query = supabase.from('stage_events').select('*').order('created_at', { ascending: false });
-  if (sinceDate) query = query.gte('created_at', `${sinceDate}T00:00:00Z`);
-  return unwrap(await query, 'getStageEvents');
+  return fetchAllRows<StageEvent>((from, to) => {
+    let query = supabase.from('stage_events').select('*');
+    if (sinceDate) query = query.gte('created_at', `${sinceDate}T00:00:00Z`);
+    return query
+      .order('created_at', { ascending: false })
+      .order('id', { ascending: true })
+      .range(from, to);
+  }, 'getStageEvents');
 }
+
+/** The whole stage-event log, deduped per request (read paths only). */
+export const getAllStageEvents = cache(async (): Promise<StageEvent[]> => getStageEvents());

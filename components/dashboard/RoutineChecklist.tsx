@@ -119,7 +119,7 @@ export function RoutineChecklist({ routines, className }: RoutineChecklistProps)
         })}
       </ul>
 
-      {error && <p className="text-xs text-danger">{error}</p>}
+      {error && <p className="text-xs text-warn">{error}</p>}
     </div>
   );
 }

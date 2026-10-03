@@ -1,5 +1,7 @@
 import 'server-only';
 
+import { cache } from 'react';
+
 import { config } from '@/lib/config';
 import { daysBetween, today } from '@/lib/dates';
 import { getSupabaseServerClient } from '@/lib/supabase/server';
@@ -35,6 +37,9 @@ export async function fetchKeyDateRows(options: GetKeyDatesOptions = {}): Promis
 
   return unwrap(await query, 'getKeyDates');
 }
+
+/** Every key date row, deduped per request (read paths: stuck rules, Focus). */
+export const getAllKeyDateRows = cache(async (): Promise<KeyDate[]> => fetchKeyDateRows());
 
 /**
  * Pure: attach the countdown and the linked project's name/stage. `projects`

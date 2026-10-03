@@ -31,7 +31,8 @@ export const POST = withApi(
     revalidateProjectScreens(project.id);
 
     const costPreview = project.isActive
-      ? describeActivationCost(activeBefore + 1, { isNewBuild: project.stage === 'building' })
+      ? // Creation into Building *or* Commercialising is a start (SPEC-V2 §3).
+        describeActivationCost(activeBefore + 1, { isNewBuild: true })
       : null;
 
     return { project, costPreview };

@@ -26,8 +26,9 @@ export const POST = withApi<Params>(async (request, params) => {
     fromStage: before.stage,
     forfeitedReward: project.reward?.status === 'forfeited' ? project.reward : null,
     focus: {
-      immediateDelta: config.focus.abandonedPenalty,
-      appliesOnNextRecompute: true,
+      // Areas are never scored (SPEC-V2 §5).
+      immediateDelta: before.kind === 'area' ? 0 : config.focus.abandonedPenalty,
+      appliesOnNextRecompute: false,
     },
   };
 });

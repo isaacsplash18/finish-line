@@ -14,7 +14,7 @@ export interface NextActionEditorProps {
 
 /**
  * PRD §3.1.3 / §8.3 — the one required field, inline-editable. Editing it
- * resets the 14-day staleness clock and clears `stuck_since` (ARCHITECTURE §4.2).
+ * counts as progress (SPEC-V2 §2): it clears Stuck straight away.
  * An empty save is rejected server-side; the message is shown verbatim.
  */
 export function NextActionEditor({ projectId, nextAction, isTerminal }: NextActionEditorProps) {
@@ -52,7 +52,7 @@ export function NextActionEditor({ projectId, nextAction, isTerminal }: NextActi
     <div className="flex flex-col gap-2">
       <Textarea
         label="Next action"
-        hint="Editing this resets the 14-day staleness clock."
+        hint="Editing this counts as progress and clears Stuck."
         value={value}
         onChange={(e) => setValue(e.target.value)}
         error={error}

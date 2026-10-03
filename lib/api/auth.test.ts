@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 
-import { assertApiKey, isAuthorized, readBearerToken } from './auth';
+import { assertApiKey, assertWorkoutHookToken, isAuthorized, readBearerToken } from './auth';
 import { ApiError, mapError } from './errors';
 
 const KEY = 'test-key_0123456789abcdefghijklmnopqrstuvwxyz';
@@ -72,6 +72,42 @@ describe('assertApiKey', () => {
     const spy = vi.spyOn(console, 'error').mockImplementation(() => {});
     expect(() => assertApiKey(request({ authorization: 'Bearer ' }), undefined)).toThrow(ApiError);
     expect(spy).toHaveBeenCalled();
+    spy.mockRestore();
+  });
+});
+
+describe('assertWorkoutHookToken (POST /hooks/workout)', () => {
+  const HOOK = 'hook-token_abcdefghijklmnopqrstuvwxyz0123456789';
+  const hookRequest = (headers: Record<string, string> = {}) =>
+    new Request('http://localhost/api/v1/hooks/workout', { method: 'POST', headers });
+
+  it('passes with the hook token', () => {
+    expect(() => assertWorkoutHookToken(hookRequest({ authorization: `Bearer ${HOOK}` }), HOOK)).not.toThrow();
+  });
+
+  it('rejects a missing or wrong token with a 401', () => {
+    const cases: Record<string, string>[] = [{}, { authorization: 'Bearer nope' }, { authorization: `Bearer ${HOOK}x` }];
+    for (const headers of cases) {
+      const error = captured(() => assertWorkoutHookToken(hookRequest(headers), HOOK));
+      expect(mapError(error).status).toBe(401);
+    }
+  });
+
+  it('does not accept the main API key', () => {
+    const error = captured(() =>
+      assertWorkoutHookToken(hookRequest({ authorization: `Bearer ${KEY}` }), HOOK),
+    );
+    expect(mapError(error)).toMatchObject({ status: 401, body: { code: 'UNAUTHORIZED' } });
+  });
+
+  it('is not accepted by the main API', () => {
+    expect(() => assertApiKey(request({ authorization: `Bearer ${HOOK}` }), KEY)).toThrow(ApiError);
+  });
+
+  it('fails closed when WORKOUT_HOOK_TOKEN is unset', () => {
+    const spy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    expect(() => assertWorkoutHookToken(hookRequest({ authorization: 'Bearer anything' }), undefined)).toThrow(ApiError);
+    expect(() => assertWorkoutHookToken(hookRequest({ authorization: 'Bearer ' }), '')).toThrow(ApiError);
     spy.mockRestore();
   });
 });

@@ -4,22 +4,25 @@ import { useEffect, useState, useTransition } from 'react';
 
 import { moveProjectStageAction, previewStageMoveAction, type ActionResult } from '@/app/projects/actions';
 import { Button, Modal } from '@/components';
+import type { StageMovePreview } from '@/lib/data/projects';
 import { STAGE_LABELS, type ProjectStage, type UUID } from '@/lib/types';
-import type { WipCostPreview } from '@/lib/scores';
 
 export interface StageMoveModalProps {
-  project: { id: UUID; name: string };
+  project: { id: UUID; name: string; stage?: ProjectStage };
   targetStage: ProjectStage;
   onClose: () => void;
 }
 
-type Preview = WipCostPreview & { killBonusCopy: string | null };
+type Preview = StageMovePreview;
 
 /**
  * The "state the price up front" confirm for any non-terminal stage move
- * (SPEC-CHANGES §1/§4). Fetches `previewStageMove` on open so the copy always
- * reflects the live active count, then either lets the move through free or
- * shows the cost — it never disables the confirm button either way.
+ * (SPEC-V2 §3). Fetches `previewStageMove` on open so the copy always
+ * reflects the live active count. At or under the cap the preview copy is
+ * empty and we say so ("No charge — 2 of 3 active."); only a move that adds
+ * an active project over the cap carries copy, and it comes verbatim from
+ * `describeStageMoveCost` (which also says "No activation charge" for the
+ * Shipped → Commercialising last mile). It never disables the confirm button.
  */
 export function StageMoveModal({ project, targetStage, onClose }: StageMoveModalProps) {
   const [preview, setPreview] = useState<Preview | null>(null);
@@ -51,7 +54,8 @@ export function StageMoveModal({ project, targetStage, onClose }: StageMoveModal
   }
 
   const label = STAGE_LABELS[targetStage];
-  const tone = preview && preview.level === 'over' ? 'warn' : 'default';
+  const costs = Boolean(preview?.copy);
+  const tone = preview && costs && preview.level === 'over' ? 'warn' : 'default';
 
   return (
     <Modal
@@ -67,7 +71,7 @@ export function StageMoveModal({ project, targetStage, onClose }: StageMoveModal
         ) : preview.copy ? (
           preview.copy
         ) : (
-          `${preview.activeCountAfter} of ${preview.cap} active. No cost.`
+          `No charge — ${preview.activeCountAfter} of ${preview.cap} active.`
         )
       }
       footer={

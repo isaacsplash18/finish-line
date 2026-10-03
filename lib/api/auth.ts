@@ -52,3 +52,26 @@ export function assertApiKey(
     );
   }
 }
+
+/**
+ * `POST /api/v1/hooks/workout` (SPEC-V2 §8) — a separate, low-value token so
+ * the public daily-app can tick workouts without ever holding `API_KEY`.
+ * Constant-time compare; fails closed when `WORKOUT_HOOK_TOKEN` is unset. The
+ * main API key is deliberately NOT accepted here, and this token is accepted
+ * nowhere else.
+ */
+export function assertWorkoutHookToken(
+  request: Request,
+  token: string | undefined = process.env.WORKOUT_HOOK_TOKEN,
+): void {
+  if (!token) {
+    console.error('[api] WORKOUT_HOOK_TOKEN is not set — rejecting every /hooks/workout request.');
+  }
+  if (!isAuthorized(request.headers.get('authorization'), token)) {
+    throw new ApiError(
+      401,
+      'UNAUTHORIZED',
+      'Missing or invalid hook token. Send Authorization: Bearer <WORKOUT_HOOK_TOKEN>.',
+    );
+  }
+}

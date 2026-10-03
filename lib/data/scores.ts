@@ -3,24 +3,141 @@ import 'server-only';
 import { config } from '@/lib/config';
 import { addDays, today } from '@/lib/dates';
 import {
-  explainFlowScore,
-  explainFocusScore,
+  computeCounters,
+  computeFlow,
+  computeFocusWeek,
+  isArea,
+  weekStartSgt,
   type FlowScoreBreakdown,
-  type FocusScoreBreakdown,
 } from '@/lib/scores';
 import { getSupabaseServerClient } from '@/lib/supabase/server';
-import type { DateKey, ScoreSnapshot } from '@/lib/types';
+import type {
+  CountersSummary,
+  DateKey,
+  FocusWeekBreakdown,
+  KeyDate,
+  ProgressEvent,
+  Project,
+  ScoreSnapshot,
+  Season,
+  StageEvent,
+} from '@/lib/types';
 
 import { unwrap, unwrapNullable } from './errors';
-import { getStageEvents, recomputeStuckFlags, type StuckRecomputeResult } from './projects';
+import { syncGithubProgress, type GithubSyncResult } from './github';
+import { getAllKeyDateRows, fetchKeyDateRows } from './key-dates';
+import {
+  fetchProgressEventsSince,
+  getDidItEvents,
+  getProgressEventsSince,
+  progressLookbackStart,
+} from './progress-events';
+import {
+  getAllProjectRows,
+  getAllStageEvents,
+  getStageEvents,
+  recomputeStuckFlags,
+  type StuckRecomputeResult,
+} from './projects';
 import { applyRewardLockingRule, type RewardLockResult } from './rewards';
 import { fetchRoutineChecks, fetchRoutines } from './routines';
+import { getCurrentSeason } from './seasons';
+
+/* ================================================================== */
+/* Pure assembly (shared with the dashboard, which loads its own rows) */
+/* ================================================================== */
+
+/** Build this week's Focus from loaded rows. */
+export function focusWeekFromRows(
+  rows: {
+    projects: readonly Project[];
+    stageEvents: readonly StageEvent[];
+    progressEvents: readonly ProgressEvent[];
+    keyDates: readonly KeyDate[];
+  },
+  weekStart: DateKey,
+  now: Date | DateKey = new Date(),
+): FocusWeekBreakdown {
+  return computeFocusWeek(
+    {
+      projects: rows.projects,
+      stageEvents: rows.stageEvents,
+      progressEvents: rows.progressEvents,
+      keyDates: rows.keyDates.filter((k) => k.project_id != null),
+    },
+    weekStart,
+    now,
+  );
+}
+
+/** Build the up-only counters from loaded rows. */
+export function countersFromRows(
+  rows: {
+    projects: readonly Project[];
+    stageEvents: readonly StageEvent[];
+    didItEvents: readonly Pick<ProgressEvent, 'project_id' | 'day' | 'kind'>[];
+    season: Season | null;
+  },
+  now: Date | DateKey = new Date(),
+): CountersSummary {
+  return computeCounters(
+    {
+      stageEvents: rows.stageEvents,
+      didItEvents: rows.didItEvents,
+      areaIds: rows.projects.filter(isArea).map((p) => p.id),
+    },
+    rows.season?.started_at ?? null,
+    now,
+  );
+}
+
+/* ================================================================== */
+/* Live reads                                                         */
+/* ================================================================== */
+
+/**
+ * This week's Focus, live (SPEC-V2 §3): computed on read from events since
+ * Monday 00:00 SGT — a Did-it tap moves it on the next read, no recompute.
+ * Four parallel reads, each deduped per request.
+ */
+export async function getFocusWeek(now: Date = new Date()): Promise<FocusWeekBreakdown> {
+  const asOf = today();
+  const [projects, stageEvents, progressEvents, keyDates] = await Promise.all([
+    getAllProjectRows(),
+    getAllStageEvents(),
+    getProgressEventsSince(progressLookbackStart(asOf)),
+    getAllKeyDateRows(),
+  ]);
+  return focusWeekFromRows({ projects, stageEvents, progressEvents, keyDates }, weekStartSgt(now), now);
+}
+
+/** Up-only counters for the current season and lifetime (SPEC-V2 §3, §7). */
+export async function getCounters(now: Date = new Date()): Promise<CountersSummary> {
+  const [projects, stageEvents, didItEvents, season] = await Promise.all([
+    getAllProjectRows(),
+    getAllStageEvents(),
+    getDidItEvents(),
+    getCurrentSeason(),
+  ]);
+  return countersFromRows({ projects, stageEvents, didItEvents, season }, now);
+}
+
+/** Live Flow over the rolling 7 days (SPEC-V2 §3 — the formula is v1's). */
+export async function getFlow(asOf: DateKey = today()): Promise<FlowScoreBreakdown> {
+  const [routines, checks] = await Promise.all([
+    fetchRoutines(false),
+    fetchRoutineChecks(addDays(asOf, -(config.flow.windowDays - 1)), asOf),
+  ]);
+  return computeFlow({ routines, checks, asOf });
+}
+
+/* ================================================================== */
+/* Snapshots (sparklines) + the nightly job                           */
+/* ================================================================== */
 
 /**
  * The last `days` daily snapshots, OLDEST FIRST — feed this straight into
- * `<Sparkline />`. PRD §6: 30-day sparklines.
- *
- * Days with no snapshot are simply absent; the Sparkline handles short series.
+ * `<Sparkline />`. Days with no snapshot are simply absent.
  */
 export async function getScoreSnapshots(
   days: number = config.ui.sparklinePoints,
@@ -50,65 +167,67 @@ export async function getTodaySnapshot(asOf: DateKey = today()): Promise<ScoreSn
 export interface RecomputeResult {
   snapshot: ScoreSnapshot;
   flow: FlowScoreBreakdown;
-  focus: FocusScoreBreakdown;
+  /** This week's Focus as of the recompute (v2: weekly, not rolling 30 days). */
+  focus: FocusWeekBreakdown;
   stuck: StuckRecomputeResult;
   rewards: RewardLockResult;
+  /** Null when the GitHub sync was skipped (`syncGithub: false`). */
+  github: GithubSyncResult | null;
 }
 
 /**
- * The nightly job, and the lazy dashboard fallback. PRD §6 + §13.2/§13.5.
+ * The nightly job, and the lazy dashboard fallback. Idempotent.
  *
  * In order:
- *  1. recompute `stuck_since` on every project (14-day idle, plus passed key
- *     dates on projects that are not Done)
- *  2. apply the reward locking rule — unclaimed rewards lock while anything is
- *     Stuck OR the portfolio is over the soft WIP cap (SPEC-CHANGES §3)
- *  3. compute the Flow score from the rolling 7-day routine window
- *  4. compute the Focus score from the rolling 30-day stage-event window,
- *     the currently-stuck set, and the reconstructed over-cap days
- *  5. upsert today's `score_snapshots` row
+ *  1. sync GitHub commits → `progress_events(kind='commit')` (never throws)
+ *  2. recompute `stuck_since` (SPEC-V2 §2 — progress events + key dates)
+ *  3. apply the reward gate (locked only while over cap)
+ *  4. compute live Flow (rolling 7 days) and this week's Focus
+ *  5. upsert today's `score_snapshots` row — the snapshot now only feeds the
+ *     30-day sparklines; screens read Flow/Focus live.
  *
- * Idempotent: safe to run many times a day. Call it from
- * `GET /api/cron` (Vercel Cron) and lazily from the dashboard when today's
- * snapshot is missing.
+ * `syncGithub: false` skips step 1 (the dashboard fallback does, so opening
+ * the app never waits on GitHub).
  */
 export async function computeAndSnapshotToday(
   asOf: DateKey = today(),
+  options: { syncGithub?: boolean } = {},
 ): Promise<RecomputeResult> {
   const supabase = await getSupabaseServerClient();
 
-  // The score inputs that don't depend on the stuck/lock pass (routines, the
-  // Flow-window checks, the stage-event log) start immediately and overlap
-  // with it. Uncached readers on purpose: this job writes state, so it must
-  // never see a copy cached earlier in the same request.
+  // Inputs that nothing below writes start immediately and overlap with the
+  // stateful steps. Uncached readers on purpose: this job writes state.
   const flowFrom = addDays(asOf, -(config.flow.windowDays - 1));
   const inputs = Promise.all([
     fetchRoutines(false),
     fetchRoutineChecks(flowFrom, asOf),
     getStageEvents(),
+    fetchKeyDateRows(),
   ]);
-  // Avoid an unhandled rejection if the stuck pass throws before we await it.
-  inputs.catch(() => undefined);
+  inputs.catch(() => undefined); // no unhandled rejection if a step below throws first
 
-  // 1 + 2 — state first, so the scores read a consistent world.
+  // 1 — GitHub first, so commits count before stuck is decided.
+  const github =
+    options.syncGithub === false ? null : await syncGithubProgress({ recomputeStuck: false });
+
+  // 2 + 3 — state, so the scores read a consistent world.
   const stuck = await recomputeStuckFlags(asOf);
-  const [rewards, stuckProjectsRes] = await Promise.all([
+  const [rewards, projectsRes, progressEvents] = await Promise.all([
     applyRewardLockingRule(),
-    supabase.from('projects').select('id, stuck_since').not('stuck_since', 'is', null),
+    supabase.from('projects').select('*'),
+    fetchProgressEventsSince(progressLookbackStart(asOf)),
   ]);
+  const projects = unwrap(projectsRes, 'computeAndSnapshotToday:projects');
 
-  // 3 — Flow.
-  const [routines, checks, events] = await inputs;
-  const flow = explainFlowScore({ routines, checks, asOf });
-
-  // 4 — Focus. The whole event history is passed in: the over-cap bleed
-  // reconstructs each day's Active count from it (see countOverCapProjectDays).
-  const stuckProjects = unwrap(stuckProjectsRes, 'computeAndSnapshotToday:stuck');
-  const focus = explainFocusScore({
-    events,
-    stuckProjects: stuckProjects.map((p) => ({ id: p.id, stuck_since: p.stuck_since })),
-    asOf,
-  });
+  // 4 — scores. Today ⇒ live at this instant; a past `asOf` ⇒ as of its close.
+  const [routines, checks, stageEvents, keyDates] = await inputs;
+  const flow = computeFlow({ routines, checks, asOf });
+  const now: Date | DateKey = asOf === today() ? new Date() : asOf;
+  const focus = focusWeekFromRows(
+    { projects, stageEvents, progressEvents, keyDates },
+    weekStartSgt(asOf),
+    now,
+  );
 
   // 5 — snapshot.
   const snapshot = unwrap(
@@ -120,16 +239,16 @@ export async function computeAndSnapshotToday(
     'computeAndSnapshotToday:upsert',
   );
 
-  return { snapshot, flow, focus, stuck, rewards };
+  return { snapshot, flow, focus, stuck, rewards, github };
 }
 
 /**
- * Lazy path for the dashboard: if the cron has not run yet today, run it now.
+ * Lazy path: if the cron has not run yet today, run it now (without GitHub).
  * Cheap when today's row already exists (one indexed lookup).
  */
 export async function ensureTodaySnapshot(asOf: DateKey = today()): Promise<ScoreSnapshot> {
   const existing = await getTodaySnapshot(asOf);
   if (existing) return existing;
-  const { snapshot } = await computeAndSnapshotToday(asOf);
+  const { snapshot } = await computeAndSnapshotToday(asOf, { syncGithub: false });
   return snapshot;
 }
