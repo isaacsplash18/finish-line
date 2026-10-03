@@ -3,8 +3,8 @@ import Link from 'next/link';
 import { AppShell, EmptyState } from '@/components';
 import { RoutineHeatCard } from '@/components/routines/RoutineHeatCard';
 import { config } from '@/lib/config';
-import { addDays, today } from '@/lib/dates';
-import { getRoutinesWithChecks, getSabbathDays } from '@/lib/data';
+import { today } from '@/lib/dates';
+import { getRoutinesWithChecks, sabbathDaysOf } from '@/lib/data';
 
 export const metadata = { title: 'Routines' };
 
@@ -16,12 +16,10 @@ export const metadata = { title: 'Routines' };
 export default async function RoutinesPage() {
   const asOf = today();
   const days = config.ui.heatCalendarWeeks * 7;
-  const from = addDays(asOf, -(days - 1));
 
-  const [routines, sabbathDays] = await Promise.all([
-    getRoutinesWithChecks({ days, asOf }),
-    getSabbathDays(from, asOf),
-  ]);
+  // Sabbath days come out of the routines/checks we already loaded.
+  const routines = await getRoutinesWithChecks({ days, asOf });
+  const sabbathDays = sabbathDaysOf(routines);
 
   const sabbathRoutine = routines.find((r) => r.is_sabbath) ?? null;
   const regularRoutines = routines.filter((r) => !r.is_sabbath);

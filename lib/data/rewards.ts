@@ -1,5 +1,7 @@
 import 'server-only';
 
+import { cache } from 'react';
+
 import { config } from '@/lib/config';
 import { getSupabaseServerClient } from '@/lib/supabase/server';
 import type {
@@ -10,16 +12,21 @@ import type {
   UUID,
 } from '@/lib/types';
 
-import { NotFoundError, ValidationError, requireText, unwrap, unwrapNullable } from './errors';
+import { DatabaseError, NotFoundError, ValidationError, requireText, unwrap, unwrapNullable } from './errors';
 
-/** Every reward, newest first. Includes forfeited tombstones (PRD §4.3.2). */
-export async function getRewards(): Promise<Reward[]> {
+/**
+ * Every reward, newest first. Includes forfeited tombstones (PRD §4.3.2).
+ *
+ * Deduped per request (`React.cache`) — the Projects/Settings/Dashboard reads
+ * all need rewards, once. Mutations never call this.
+ */
+export const getRewards = cache(async (): Promise<Reward[]> => {
   const supabase = await getSupabaseServerClient();
   return unwrap(
     await supabase.from('rewards').select('*').order('created_at', { ascending: false }),
     'getRewards',
   );
-}
+});
 
 export async function getReward(id: UUID): Promise<Reward | null> {
   const supabase = await getSupabaseServerClient();
@@ -128,6 +135,23 @@ export async function forfeitReward(id: UUID): Promise<Reward> {
   );
 }
 
+/**
+ * Pure: is the reward gate shut for this portfolio? Shared by
+ * `applyRewardLockingRule` (which writes) and the dashboard (which only reads
+ * and so never needs to touch the DB to answer "locked?").
+ */
+export function computeRewardGate(
+  projects: readonly { stage: string; stuck_since: string | null }[],
+): { locked: boolean; hasStuckProject: boolean; isOverCap: boolean; activeCount: number; cap: number } {
+  const hasStuckProject = projects.some((p) => p.stuck_since !== null);
+  const activeCount = projects.filter((p) =>
+    config.projects.activeStages.includes(p.stage as ProjectStage),
+  ).length;
+  const cap = config.projects.wipLimit;
+  const isOverCap = activeCount > cap;
+  return { locked: hasStuckProject || isOverCap, hasStuckProject, isOverCap, activeCount, cap };
+}
+
 export interface RewardLockResult {
   /** True when unclaimed rewards are currently locked. */
   locked: boolean;
@@ -157,35 +181,40 @@ export interface RewardLockResult {
 export async function applyRewardLockingRule(): Promise<RewardLockResult> {
   const supabase = await getSupabaseServerClient();
 
-  const projects = unwrap(
-    await supabase.from('projects').select('id, stage, stuck_since'),
-    'applyRewardLockingRule:projects',
-  );
-  const rewards = unwrap(
-    await supabase.from('rewards').select('*').in('status', ['locked_pending', 'claimable']),
-    'applyRewardLockingRule:rewards',
-  );
+  const [projectsRes, rewardsRes] = await Promise.all([
+    supabase.from('projects').select('id, stage, stuck_since'),
+    supabase.from('rewards').select('*').in('status', ['locked_pending', 'claimable']),
+  ]);
+  const projects = unwrap(projectsRes, 'applyRewardLockingRule:projects');
+  const rewards = unwrap(rewardsRes, 'applyRewardLockingRule:rewards');
 
-  const hasStuckProject = projects.some((p) => p.stuck_since !== null);
-  const activeCount = projects.filter((p) =>
-    config.projects.activeStages.includes(p.stage as ProjectStage),
-  ).length;
-  const cap = config.projects.wipLimit;
-  const isOverCap = activeCount > cap;
-  const locked = hasStuckProject || isOverCap;
+  const { locked, hasStuckProject, isOverCap, activeCount, cap } = computeRewardGate(projects);
 
   const doneProjectIds = new Set(
     projects.filter((p) => p.stage === 'done').map((p) => p.id as UUID),
   );
 
+  // Batch the writes: at most one UPDATE per target status, not one per reward.
   const changedRewardIds: UUID[] = [];
+  const toClaimable: UUID[] = [];
+  const toLocked: UUID[] = [];
   for (const reward of rewards) {
     const earned = reward.project_id != null && doneProjectIds.has(reward.project_id);
     const desired = earned && !locked ? 'claimable' : 'locked_pending';
     if (reward.status !== desired) {
-      await supabase.from('rewards').update({ status: desired }).eq('id', reward.id);
+      (desired === 'claimable' ? toClaimable : toLocked).push(reward.id);
       changedRewardIds.push(reward.id);
     }
+  }
+  const writes: PromiseLike<{ error: { message: string } | null }>[] = [];
+  if (toClaimable.length > 0) {
+    writes.push(supabase.from('rewards').update({ status: 'claimable' }).in('id', toClaimable));
+  }
+  if (toLocked.length > 0) {
+    writes.push(supabase.from('rewards').update({ status: 'locked_pending' }).in('id', toLocked));
+  }
+  for (const { error } of await Promise.all(writes)) {
+    if (error) throw new DatabaseError(`applyRewardLockingRule: ${error.message}`, error);
   }
 
   return { locked, hasStuckProject, isOverCap, activeCount, cap, changedRewardIds };

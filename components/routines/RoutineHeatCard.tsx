@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useTransition } from 'react';
+import { useOptimistic, useState, useTransition } from 'react';
 
 import {
   decrementRoutineAction,
@@ -26,6 +26,40 @@ function currentWeekRange(asOf: DateKey): [DateKey, DateKey] {
   return [start, addDays(start, 6)];
 }
 
+/** Optimistic edits, mirroring what the server actions do. */
+type RoutineOp =
+  | { type: 'set'; date: DateKey; count: number }
+  | { type: 'add'; date: DateKey; by: number }
+  /** Marking a sabbath clears any other mark in the same Sun–Sat week. */
+  | { type: 'sabbath'; date: DateKey }
+  | { type: 'target'; value: number };
+
+function applyOp(routine: RoutineWithChecks, op: RoutineOp): RoutineWithChecks {
+  switch (op.type) {
+    case 'set':
+      return { ...routine, checksByDate: { ...routine.checksByDate, [op.date]: op.count } };
+    case 'add':
+      return {
+        ...routine,
+        checksByDate: {
+          ...routine.checksByDate,
+          [op.date]: Math.max(0, (routine.checksByDate[op.date] ?? 0) + op.by),
+        },
+      };
+    case 'sabbath': {
+      const [start, end] = currentWeekRange(op.date);
+      const checksByDate = { ...routine.checksByDate };
+      for (const date of Object.keys(checksByDate)) {
+        if (date >= start && date <= end && date !== op.date) checksByDate[date] = 0;
+      }
+      checksByDate[op.date] = 1;
+      return { ...routine, checksByDate };
+    }
+    case 'target':
+      return { ...routine, weekly_target: op.value };
+  }
+}
+
 /**
  * One routine's 4-week heat calendar plus its editing affordances (PRD §8.4).
  *
@@ -38,11 +72,15 @@ function currentWeekRange(asOf: DateKey): [DateKey, DateKey] {
  * Only the current week is editable — history is locked in, matching the
  * weekly-target framing ("current week progress vs weekly_target").
  */
-export function RoutineHeatCard({ routine, sabbathDays }: RoutineHeatCardProps) {
+export function RoutineHeatCard({ routine: serverRoutine, sabbathDays }: RoutineHeatCardProps) {
   const [isPending, startTransition] = useTransition();
+  // Ticks flip instantly; React drops the optimistic layer when the action's
+  // transition settles (the fresh server render replaces it, or, on error, the
+  // old state simply comes back).
+  const [routine, applyOptimistic] = useOptimistic(serverRoutine, applyOp);
   const [error, setError] = useState<string | null>(null);
   const [editingTarget, setEditingTarget] = useState(false);
-  const [targetDraft, setTargetDraft] = useState(String(routine.weekly_target));
+  const [targetDraft, setTargetDraft] = useState(String(serverRoutine.weekly_target));
 
   const asOf = today();
   const [weekStart, weekEnd] = currentWeekRange(asOf);
@@ -56,9 +94,16 @@ export function RoutineHeatCard({ routine, sabbathDays }: RoutineHeatCardProps) 
       ? weekEntries.filter(([, count]) => count > 0).length
       : weekEntries.reduce((sum, [, count]) => sum + count, 0);
 
-  function run(action: () => Promise<{ ok: boolean; error?: string }>) {
+  // The sabbath card's own rings follow its optimistic ticks; other cards wait
+  // for the server render (a few hundred ms) since they only borrow the days.
+  const ownSabbathDays = Object.entries(routine.checksByDate)
+    .filter(([, count]) => count > 0)
+    .map(([date]) => date);
+
+  function run(op: RoutineOp, action: () => Promise<{ ok: boolean; error?: string }>) {
     setError(null);
     startTransition(async () => {
+      applyOptimistic(op);
       const result = await action();
       if (!result.ok) setError(result.error ?? 'That did not work.');
     });
@@ -76,22 +121,28 @@ export function RoutineHeatCard({ routine, sabbathDays }: RoutineHeatCardProps) 
         return;
       }
       const isMarked = (routine.checksByDate[date] ?? 0) > 0;
-      run(() => (isMarked ? clearSabbathAction(date) : setSabbathAction(date)));
+      run(
+        isMarked ? { type: 'set', date, count: 0 } : { type: 'sabbath', date },
+        () => (isMarked ? clearSabbathAction(date) : setSabbathAction(date)),
+      );
       return;
     }
     if (routine.cadence === 'weekly') {
-      run(() => incrementRoutineAction(routine.id, date));
+      run({ type: 'add', date, by: 1 }, () => incrementRoutineAction(routine.id, date));
       return;
     }
-    run(() => toggleRoutineAction(routine.id, date));
+    const isDone = (routine.checksByDate[date] ?? 0) > 0;
+    run({ type: 'set', date, count: isDone ? 0 : 1 }, () => toggleRoutineAction(routine.id, date));
   }
 
   function handleAdjustToday(delta: number) {
     if (delta > 0) {
-      run(() => incrementRoutineAction(routine.id, asOf, 1));
+      run({ type: 'add', date: asOf, by: 1 }, () => incrementRoutineAction(routine.id, asOf, 1));
     } else {
       const currentCount = routine.checksByDate[asOf] ?? 0;
-      run(() => decrementRoutineAction(routine.id, asOf, currentCount));
+      run({ type: 'add', date: asOf, by: -1 }, () =>
+        decrementRoutineAction(routine.id, asOf, currentCount),
+      );
     }
   }
 
@@ -103,6 +154,7 @@ export function RoutineHeatCard({ routine, sabbathDays }: RoutineHeatCardProps) 
     }
     setError(null);
     startTransition(async () => {
+      applyOptimistic({ type: 'target', value: parsed });
       const result = await updateRoutineTargetAction(routine.id, parsed);
       if (!result.ok) setError(result.error ?? 'That did not work.');
       else setEditingTarget(false);
@@ -189,7 +241,7 @@ export function RoutineHeatCard({ routine, sabbathDays }: RoutineHeatCardProps) 
       <HeatCalendar
         checksByDate={routine.checksByDate}
         asOf={asOf}
-        sabbathDays={sabbathDays}
+        sabbathDays={routine.is_sabbath ? ownSabbathDays : sabbathDays}
         onToggleDate={handleToggleDate}
         tone={routine.is_sabbath ? 'accent' : 'positive'}
       />

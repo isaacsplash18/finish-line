@@ -36,3 +36,4 @@ export {
 } from './ui/Input';
 export { Modal, type ModalProps } from './ui/Modal';
 export { Card, CardHeader, SectionTitle, EmptyState, type CardProps } from './ui/Card';
+export { Skeleton, SkeletonCard, type SkeletonProps } from './ui/Skeleton';

@@ -13,7 +13,8 @@ import { isSupabaseConfigured } from '@/lib/supabase/env';
  * `Authorization: Bearer <CRON_SECRET>` — Vercel Cron sends this automatically.
  * With no secret set (local dev) the route is open.
  *
- * The dashboard also calls `ensureTodaySnapshot()` on load, so a missed night
+ * The dashboard falls back to `computeAndSnapshotToday()` when today's
+ * snapshot is missing, so a missed night
  * self-heals the next time Isaac opens the app.
  */
 export const dynamic = 'force-dynamic';

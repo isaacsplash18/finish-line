@@ -1,5 +1,7 @@
 import 'server-only';
 
+import { cache } from 'react';
+
 import { config } from '@/lib/config';
 import { addDays, dayOfWeek, lastNDates, today } from '@/lib/dates';
 import { getSupabaseServerClient } from '@/lib/supabase/server';
@@ -19,11 +21,19 @@ import { NotFoundError, ValidationError, requireText, unwrap, unwrapNullable } f
 /* Reads                                                              */
 /* ================================================================== */
 
-export async function getRoutines(includeInactive = false): Promise<Routine[]> {
+/** Uncached read. Writers and the recompute job use this so they never see a stale copy. */
+export async function fetchRoutines(includeInactive = false): Promise<Routine[]> {
   const supabase = await getSupabaseServerClient();
   let query = supabase.from('routines').select('*').order('sort_order', { ascending: true });
   if (!includeInactive) query = query.eq('active', true);
   return unwrap(await query, 'getRoutines');
+}
+
+const getRoutinesCached = cache(fetchRoutines);
+
+/** Routines, deduped per request (primitive arg, so `React.cache` can key on it). */
+export async function getRoutines(includeInactive = false): Promise<Routine[]> {
+  return getRoutinesCached(includeInactive);
 }
 
 export async function getRoutine(id: UUID): Promise<Routine | null> {
@@ -44,8 +54,8 @@ export async function getSabbathRoutine(): Promise<Routine | null> {
   return rows[0] ?? null;
 }
 
-/** Raw checks in a date range, inclusive. Feeds `computeFlowScore`. */
-export async function getRoutineChecks(from: DateKey, to: DateKey): Promise<RoutineCheck[]> {
+/** Uncached raw checks in a date range, inclusive. */
+export async function fetchRoutineChecks(from: DateKey, to: DateKey): Promise<RoutineCheck[]> {
   const supabase = await getSupabaseServerClient();
   return unwrap(
     await supabase
@@ -58,24 +68,22 @@ export async function getRoutineChecks(from: DateKey, to: DateKey): Promise<Rout
   );
 }
 
+const getRoutineChecksCached = cache(fetchRoutineChecks);
+
+/** Raw checks in a date range, inclusive, deduped per request. Feeds `computeFlowScore`. */
+export async function getRoutineChecks(from: DateKey, to: DateKey): Promise<RoutineCheck[]> {
+  return getRoutineChecksCached(from, to);
+}
+
 /**
- * Routines plus their recent history, ready for the Beaver-Habits-style heat
- * calendar (PRD §5.3.1). `days` defaults to the 4-week view.
+ * Pure: routines + their check history in the shape the heat calendar wants.
+ * `getRoutinesWithChecks` and the dashboard both use it.
  */
-export async function getRoutinesWithChecks(options: {
-  days?: number;
-  asOf?: DateKey;
-  includeInactive?: boolean;
-} = {}): Promise<RoutineWithChecks[]> {
-  const asOf = options.asOf ?? today();
-  const days = options.days ?? config.ui.heatCalendarWeeks * 7;
-  const from = addDays(asOf, -(days - 1));
-
-  const [routines, checks] = await Promise.all([
-    getRoutines(options.includeInactive),
-    getRoutineChecks(from, asOf),
-  ]);
-
+export function buildRoutinesWithChecks(
+  routines: readonly Routine[],
+  checks: readonly RoutineCheck[],
+  asOf: DateKey = today(),
+): RoutineWithChecks[] {
   const windowKeys = new Set(lastNDates(config.flow.windowDays, asOf));
 
   return routines.map((routine) => {
@@ -95,12 +103,62 @@ export async function getRoutinesWithChecks(options: {
   });
 }
 
-/** Dates in the range that are marked as sabbath. */
-export async function getSabbathDays(from: DateKey, to: DateKey): Promise<DateKey[]> {
-  const sabbath = await getSabbathRoutine();
+/**
+ * Routines plus their recent history, ready for the Beaver-Habits-style heat
+ * calendar (PRD §5.3.1). `days` defaults to the 4-week view.
+ */
+export async function getRoutinesWithChecks(options: {
+  days?: number;
+  asOf?: DateKey;
+  includeInactive?: boolean;
+} = {}): Promise<RoutineWithChecks[]> {
+  const asOf = options.asOf ?? today();
+  const days = options.days ?? config.ui.heatCalendarWeeks * 7;
+  const from = addDays(asOf, -(days - 1));
+
+  const [routines, checks] = await Promise.all([
+    getRoutines(options.includeInactive ?? false),
+    getRoutineChecks(from, asOf),
+  ]);
+
+  return buildRoutinesWithChecks(routines, checks, asOf);
+}
+
+/**
+ * Pure: the sabbath dates already present in a loaded `getRoutinesWithChecks`
+ * result. Lets a screen that has the routines in hand skip a second round of
+ * routine/check queries.
+ */
+export function sabbathDaysOf(routines: readonly RoutineWithChecks[]): DateKey[] {
+  const sabbath = routines.find((r) => r.is_sabbath);
   if (!sabbath) return [];
-  const checks = await getRoutineChecks(from, to);
-  return checks.filter((c) => c.routine_id === sabbath.id && c.count > 0).map((c) => c.date);
+  return Object.entries(sabbath.checksByDate)
+    .filter(([, count]) => count > 0)
+    .map(([date]) => date)
+    .sort();
+}
+
+/**
+ * Dates in the range that are marked as sabbath.
+ *
+ * Pass `preloaded` routines and/or checks you already have to avoid re-querying
+ * them; whichever is missing is fetched (in parallel).
+ */
+export async function getSabbathDays(
+  from: DateKey,
+  to: DateKey,
+  preloaded: { routines?: readonly Routine[]; checks?: readonly RoutineCheck[] } = {},
+): Promise<DateKey[]> {
+  const [sabbath, checks] = await Promise.all([
+    preloaded.routines
+      ? Promise.resolve(preloaded.routines.find((r) => r.is_sabbath) ?? null)
+      : getSabbathRoutine(),
+    preloaded.checks ? Promise.resolve(preloaded.checks) : getRoutineChecks(from, to),
+  ]);
+  if (!sabbath) return [];
+  return checks
+    .filter((c) => c.routine_id === sabbath.id && c.count > 0 && c.date >= from && c.date <= to)
+    .map((c) => c.date);
 }
 
 /* ================================================================== */

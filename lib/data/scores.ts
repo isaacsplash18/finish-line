@@ -14,7 +14,7 @@ import type { DateKey, ScoreSnapshot } from '@/lib/types';
 import { unwrap, unwrapNullable } from './errors';
 import { getStageEvents, recomputeStuckFlags, type StuckRecomputeResult } from './projects';
 import { applyRewardLockingRule, type RewardLockResult } from './rewards';
-import { getRoutineChecks, getRoutines } from './routines';
+import { fetchRoutineChecks, fetchRoutines } from './routines';
 
 /**
  * The last `days` daily snapshots, OLDEST FIRST — feed this straight into
@@ -77,25 +77,33 @@ export async function computeAndSnapshotToday(
 ): Promise<RecomputeResult> {
   const supabase = await getSupabaseServerClient();
 
+  // The score inputs that don't depend on the stuck/lock pass (routines, the
+  // Flow-window checks, the stage-event log) start immediately and overlap
+  // with it. Uncached readers on purpose: this job writes state, so it must
+  // never see a copy cached earlier in the same request.
+  const flowFrom = addDays(asOf, -(config.flow.windowDays - 1));
+  const inputs = Promise.all([
+    fetchRoutines(false),
+    fetchRoutineChecks(flowFrom, asOf),
+    getStageEvents(),
+  ]);
+  // Avoid an unhandled rejection if the stuck pass throws before we await it.
+  inputs.catch(() => undefined);
+
   // 1 + 2 — state first, so the scores read a consistent world.
   const stuck = await recomputeStuckFlags(asOf);
-  const rewards = await applyRewardLockingRule();
+  const [rewards, stuckProjectsRes] = await Promise.all([
+    applyRewardLockingRule(),
+    supabase.from('projects').select('id, stuck_since').not('stuck_since', 'is', null),
+  ]);
 
   // 3 — Flow.
-  const flowFrom = addDays(asOf, -(config.flow.windowDays - 1));
-  const [routines, checks] = await Promise.all([
-    getRoutines(false),
-    getRoutineChecks(flowFrom, asOf),
-  ]);
+  const [routines, checks, events] = await inputs;
   const flow = explainFlowScore({ routines, checks, asOf });
 
   // 4 — Focus. The whole event history is passed in: the over-cap bleed
   // reconstructs each day's Active count from it (see countOverCapProjectDays).
-  const events = await getStageEvents();
-  const stuckProjects = unwrap(
-    await supabase.from('projects').select('id, stuck_since').not('stuck_since', 'is', null),
-    'computeAndSnapshotToday:stuck',
-  );
+  const stuckProjects = unwrap(stuckProjectsRes, 'computeAndSnapshotToday:stuck');
   const focus = explainFocusScore({
     events,
     stuckProjects: stuckProjects.map((p) => ({ id: p.id, stuck_since: p.stuck_since })),

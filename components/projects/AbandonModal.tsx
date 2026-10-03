@@ -1,7 +1,6 @@
 'use client';
 
 import { useState, useTransition } from 'react';
-import { useRouter } from 'next/navigation';
 
 import { abandonProjectAction } from '@/app/projects/actions';
 import { Button, Modal, Textarea } from '@/components';
@@ -22,7 +21,6 @@ export interface AbandonModalProps {
  * starts blank.
  */
 export function AbandonModal({ project, reward, onClose }: AbandonModalProps) {
-  const router = useRouter();
   const [reason, setReason] = useState('');
   const [error, setError] = useState<string | null>(null);
   const [pending, startTransition] = useTransition();
@@ -31,7 +29,6 @@ export function AbandonModal({ project, reward, onClose }: AbandonModalProps) {
     startTransition(async () => {
       const res = await abandonProjectAction(project.id, reason.trim() || undefined);
       if (res.ok) {
-        router.refresh();
         onClose();
       } else {
         setError(res.error);

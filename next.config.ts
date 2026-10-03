@@ -1,7 +1,8 @@
 import type { NextConfig } from "next";
 
 const nextConfig: NextConfig = {
-  /* config options here */
+  // Stop `next dev` regenerating AGENTS.md / CLAUDE.md in the repo root.
+  agentRules: false,
 };
 
 export default nextConfig;

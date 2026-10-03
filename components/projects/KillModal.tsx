@@ -1,7 +1,6 @@
 'use client';
 
 import { useEffect, useState, useTransition } from 'react';
-import { useRouter } from 'next/navigation';
 
 import { getKillPreviewAction, killProjectAction } from '@/app/projects/actions';
 import { Button, Modal, Textarea } from '@/components';
@@ -22,7 +21,6 @@ export interface KillModalProps {
  * every field starts fresh — no manual reset-in-effect needed.
  */
 export function KillModal({ project, onClose }: KillModalProps) {
-  const router = useRouter();
   const [reason, setReason] = useState('');
   const [bonusCopy, setBonusCopy] = useState<string | null | undefined>(undefined);
   const [error, setError] = useState<string | null>(null);
@@ -44,7 +42,6 @@ export function KillModal({ project, onClose }: KillModalProps) {
     startTransition(async () => {
       const res = await killProjectAction(project.id, reason);
       if (res.ok) {
-        router.refresh();
         onClose();
       } else {
         setError(res.error);

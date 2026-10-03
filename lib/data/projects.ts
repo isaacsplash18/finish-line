@@ -1,5 +1,7 @@
 import 'server-only';
 
+import { cache } from 'react';
+
 import { config } from '@/lib/config';
 import { daysBetween, daysSince, today, toDateKey } from '@/lib/dates';
 import { getSupabaseServerClient } from '@/lib/supabase/server';
@@ -34,7 +36,7 @@ import {
   unwrap,
   unwrapNullable,
 } from './errors';
-import { applyRewardLockingRule } from './rewards';
+import { applyRewardLockingRule, getRewards } from './rewards';
 
 /* ================================================================== */
 /* Helpers                                                            */
@@ -93,30 +95,60 @@ export interface GetProjectsOptions {
 }
 
 /**
- * All projects, decorated with reward + staleness metadata.
- * Sorted stuck-first then most-idle-first.
+ * Every project row, one query, deduped per request. Everything that needs a
+ * filtered view (`getProjects`, `getActiveProjects`, WIP counts, key-date
+ * project names) derives it in memory from this single read.
+ *
+ * Read path only. Mutations must not go through this — they hit Supabase
+ * directly so a later re-render in the same request can't see a stale copy.
  */
-export async function getProjects(options: GetProjectsOptions = {}): Promise<ProjectWithMeta[]> {
+export const getAllProjectRows = cache(async (): Promise<Project[]> => {
   const supabase = await getSupabaseServerClient();
+  return unwrap(await supabase.from('projects').select('*'), 'getProjects');
+});
 
-  let query = supabase.from('projects').select('*');
-  if (options.stages?.length) query = query.in('stage', options.stages as ProjectStage[]);
-  else if (options.includeTerminal === false) {
-    query = query.not('stage', 'in', `(${config.projects.terminalStages.join(',')})`);
-  }
-  if (options.onlyStuck) query = query.not('stuck_since', 'is', null);
-
-  const projects = unwrap(await query, 'getProjects');
-  const rewards = unwrap(await supabase.from('rewards').select('*'), 'getProjects:rewards');
+/**
+ * Pure: decorate raw rows with reward + staleness metadata, apply the
+ * `GetProjectsOptions` filters, and sort stuck-first then most-idle-first.
+ * Used by `getProjects` and by the dashboard (which fetches its own rows so it
+ * can run every read in one parallel batch).
+ */
+export function buildProjects(
+  rows: readonly Project[],
+  rewards: readonly Reward[],
+  options: GetProjectsOptions = {},
+  asOf: DateKey = today(),
+): ProjectWithMeta[] {
   const rewardByProject = new Map<UUID, Reward>();
   for (const reward of rewards) {
     if (reward.project_id) rewardByProject.set(reward.project_id, reward);
   }
 
-  const asOf = today();
-  return projects
+  const stages = options.stages?.length ? options.stages : null;
+  return rows
+    .filter((p) => {
+      if (stages) {
+        if (!stages.includes(p.stage)) return false;
+      } else if (options.includeTerminal === false && isTerminalStage(p.stage)) {
+        return false;
+      }
+      if (options.onlyStuck && p.stuck_since === null) return false;
+      return true;
+    })
     .map((p) => toProjectWithMeta(p, rewardByProject.get(p.id) ?? null, asOf))
     .sort(byUrgency);
+}
+
+/**
+ * All projects, decorated with reward + staleness metadata.
+ * Sorted stuck-first then most-idle-first.
+ *
+ * Two parallel reads (projects, rewards), each deduped per request; filtering
+ * happens in memory.
+ */
+export async function getProjects(options: GetProjectsOptions = {}): Promise<ProjectWithMeta[]> {
+  const [rows, rewards] = await Promise.all([getAllProjectRows(), getRewards()]);
+  return buildProjects(rows, rewards, options);
 }
 
 /** Convenience: the Building + Commercialising projects (PRD "Active"). */
@@ -156,11 +188,16 @@ export interface WipStatus {
 }
 
 /**
- * SPEC-CHANGES §1 — the cap is soft. This never gates anything; it exists so
- * the UI can state the price. Nothing here disables a control.
+ * Pure WIP maths over any list of projects — pass the whole portfolio,
+ * non-active rows are ignored.
  */
-export async function getWipStatus(): Promise<WipStatus> {
-  const active = await getActiveProjects();
+export function computeWipStatus(projects: readonly Project[]): WipStatus {
+  // Same ordering `getActiveProjects()` always gave: stuck first, then most idle.
+  const asOf = today();
+  const active = projects
+    .filter((p) => isActiveStage(p.stage))
+    .map((p) => toProjectWithMeta(p, null, asOf))
+    .sort(byUrgency);
   const cap = config.projects.wipLimit;
   const overBy = Math.max(0, active.length - cap);
 
@@ -175,6 +212,17 @@ export async function getWipStatus(): Promise<WipStatus> {
     label: `${active.length} of ${cap} active`,
     nextActivation: describeActivationCost(active.length + 1, { isNewBuild: true }),
   };
+}
+
+/**
+ * SPEC-CHANGES §1 — the cap is soft. This never gates anything; it exists so
+ * the UI can state the price. Nothing here disables a control.
+ *
+ * Pass an already-loaded project list to skip the query entirely (pages that
+ * fetched `getProjects()` anyway). Without it, one deduped projects read.
+ */
+export async function getWipStatus(projects?: readonly Project[]): Promise<WipStatus> {
+  return computeWipStatus(projects ?? (await getAllProjectRows()));
 }
 
 /**
@@ -665,17 +713,15 @@ export interface StuckRecomputeResult {
 export async function recomputeStuckFlags(asOf: DateKey = today()): Promise<StuckRecomputeResult> {
   const supabase = await getSupabaseServerClient();
 
-  const projects = unwrap(
-    await supabase
+  const [projectsRes, keyDatesRes] = await Promise.all([
+    supabase
       .from('projects')
       .select('*')
       .not('stage', 'in', `(${config.projects.terminalStages.join(',')})`),
-    'recomputeStuckFlags:projects',
-  );
-  const keyDates = unwrap(
-    await supabase.from('key_dates').select('*').not('project_id', 'is', null),
-    'recomputeStuckFlags:keyDates',
-  );
+    supabase.from('key_dates').select('*').not('project_id', 'is', null),
+  ]);
+  const projects = unwrap(projectsRes, 'recomputeStuckFlags:projects');
+  const keyDates = unwrap(keyDatesRes, 'recomputeStuckFlags:keyDates');
 
   const passedKeyDateByProject = new Map<UUID, DateKey>();
   for (const kd of keyDates) {
@@ -688,6 +734,9 @@ export async function recomputeStuckFlags(asOf: DateKey = today()): Promise<Stuc
   const stuckProjectIds: UUID[] = [];
   const newlyStuckProjectIds: UUID[] = [];
   const unstuckProjectIds: UUID[] = [];
+  // Writes are batched by target value: one UPDATE ... WHERE id IN (...) per
+  // distinct `stuck_since` date, plus one for everything being un-stuck.
+  const idsByStuckSince = new Map<DateKey, UUID[]>();
 
   for (const project of projects) {
     let stuckSince: DateKey | null = null;
@@ -710,12 +759,24 @@ export async function recomputeStuckFlags(asOf: DateKey = today()): Promise<Stuc
       stuckProjectIds.push(project.id);
       if (project.stuck_since !== stuckSince) {
         if (!project.stuck_since) newlyStuckProjectIds.push(project.id);
-        await supabase.from('projects').update({ stuck_since: stuckSince }).eq('id', project.id);
+        const ids = idsByStuckSince.get(stuckSince) ?? [];
+        ids.push(project.id);
+        idsByStuckSince.set(stuckSince, ids);
       }
     } else if (project.stuck_since) {
       unstuckProjectIds.push(project.id);
-      await supabase.from('projects').update({ stuck_since: null }).eq('id', project.id);
     }
+  }
+
+  const writes: PromiseLike<{ error: { message: string } | null }>[] = [];
+  for (const [stuckSince, ids] of idsByStuckSince) {
+    writes.push(supabase.from('projects').update({ stuck_since: stuckSince }).in('id', ids));
+  }
+  if (unstuckProjectIds.length > 0) {
+    writes.push(supabase.from('projects').update({ stuck_since: null }).in('id', unstuckProjectIds));
+  }
+  for (const { error } of await Promise.all(writes)) {
+    if (error) throw new DatabaseError(`recomputeStuckFlags: ${error.message}`, error);
   }
 
   return { stuckProjectIds, newlyStuckProjectIds, unstuckProjectIds };

@@ -1,7 +1,6 @@
 'use client';
 
 import { useEffect, useState, useTransition } from 'react';
-import { useRouter } from 'next/navigation';
 
 import { moveProjectStageAction, previewStageMoveAction, type ActionResult } from '@/app/projects/actions';
 import { Button, Modal } from '@/components';
@@ -23,7 +22,6 @@ type Preview = WipCostPreview & { killBonusCopy: string | null };
  * shows the cost — it never disables the confirm button either way.
  */
 export function StageMoveModal({ project, targetStage, onClose }: StageMoveModalProps) {
-  const router = useRouter();
   const [preview, setPreview] = useState<Preview | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [submitError, setSubmitError] = useState<string | null>(null);
@@ -45,7 +43,6 @@ export function StageMoveModal({ project, targetStage, onClose }: StageMoveModal
     startTransition(async () => {
       const res = await moveProjectStageAction(project.id, targetStage);
       if (res.ok) {
-        router.refresh();
         onClose();
       } else {
         setSubmitError(res.error);

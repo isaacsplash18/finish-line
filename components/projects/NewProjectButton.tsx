@@ -1,7 +1,6 @@
 'use client';
 
 import { useState, useTransition } from 'react';
-import { useRouter } from 'next/navigation';
 
 import { createProjectAction } from '@/app/projects/actions';
 import { Button, Input, Modal, Textarea } from '@/components';
@@ -13,7 +12,6 @@ import { Button, Input, Modal, Textarea } from '@/components';
  * `StageMoveModal`'s cost preview instead.
  */
 export function NewProjectButton() {
-  const router = useRouter();
   const [open, setOpen] = useState(false);
   const [name, setName] = useState('');
   const [resolution, setResolution] = useState('');
@@ -41,7 +39,6 @@ export function NewProjectButton() {
       if (res.ok) {
         reset();
         setOpen(false);
-        router.refresh();
       } else if (res.field === 'name') {
         setErrors({ name: res.error });
       } else if (res.field === 'next_action') {

@@ -1,7 +1,6 @@
 'use client';
 
 import { useState, useTransition } from 'react';
-import { useRouter } from 'next/navigation';
 
 import { updateProjectAction } from '@/app/projects/actions';
 import { Button, Input } from '@/components';
@@ -22,7 +21,6 @@ export function StageTargetDateEditor({
   daysToTarget,
   isTerminal,
 }: StageTargetDateEditorProps) {
-  const router = useRouter();
   const [editing, setEditing] = useState(false);
   const [value, setValue] = useState(stageTargetDate ?? '');
   const [error, setError] = useState<string | undefined>();
@@ -58,7 +56,6 @@ export function StageTargetDateEditor({
       if (res.ok) {
         setEditing(false);
         setError(undefined);
-        router.refresh();
       } else {
         setError(res.error);
       }

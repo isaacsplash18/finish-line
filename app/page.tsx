@@ -48,8 +48,6 @@ function lockReasonFor(stuckCount: number, isOverCap: boolean, wipLabel: string)
 export default async function DashboardPage() {
   const data = await getDashboardData();
 
-  const sabbathToday = data.routines.some((r) => r.is_sabbath && r.doneToday);
-
   const flowHistory = data.snapshots.map((s) => s.flow);
   const focusHistory = data.snapshots.map((s) => s.focus);
   const flowDelta = deltaOf(flowHistory);
@@ -94,7 +92,7 @@ export default async function DashboardPage() {
         {/* Today's routines */}
         <section>
           <SectionTitle>Today</SectionTitle>
-          <RoutineChecklist routines={data.routines} sabbathToday={sabbathToday} />
+          <RoutineChecklist routines={data.routines} />
         </section>
 
         {/* Active projects */}

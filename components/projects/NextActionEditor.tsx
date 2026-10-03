@@ -1,7 +1,6 @@
 'use client';
 
 import { useState, useTransition } from 'react';
-import { useRouter } from 'next/navigation';
 
 import { updateProjectAction } from '@/app/projects/actions';
 import { Button, Textarea } from '@/components';
@@ -19,7 +18,6 @@ export interface NextActionEditorProps {
  * An empty save is rejected server-side; the message is shown verbatim.
  */
 export function NextActionEditor({ projectId, nextAction, isTerminal }: NextActionEditorProps) {
-  const router = useRouter();
   const [editing, setEditing] = useState(false);
   const [value, setValue] = useState(nextAction);
   const [error, setError] = useState<string | undefined>();
@@ -44,7 +42,6 @@ export function NextActionEditor({ projectId, nextAction, isTerminal }: NextActi
       if (res.ok) {
         setEditing(false);
         setError(undefined);
-        router.refresh();
       } else {
         setError(res.error);
       }

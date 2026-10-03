@@ -7,12 +7,12 @@ import { RoutinesSection } from '@/components/settings/RoutinesSection';
 import { ScoreTuning } from '@/components/settings/ScoreTuning';
 import { config } from '@/lib/config';
 import {
+  computeWipStatus,
   getKeyDates,
   getProjects,
   getRewards,
   getRoutines,
   getScoreSnapshots,
-  getWipStatus,
 } from '@/lib/data';
 
 export const metadata = { title: 'Settings' };
@@ -23,17 +23,18 @@ export const metadata = { title: 'Settings' };
  * button.
  */
 export default async function SettingsPage() {
-  const [rewards, allProjects, assignableProjects, keyDates, routines, snapshots, wip] =
-    await Promise.all([
-      getRewards(),
-      getProjects({ includeTerminal: true }),
-      // "Not-done" projects a reward or key date can be pinned to.
-      getProjects({ includeTerminal: false }),
-      getKeyDates(),
-      getRoutines(true),
-      getScoreSnapshots(config.ui.sparklinePoints),
-      getWipStatus(),
-    ]);
+  // Five queries, one parallel batch (getProjects and getKeyDates share a single
+  // deduped projects read). Terminal / WIP views are derived in memory.
+  const [rewards, allProjects, keyDates, routines, snapshots] = await Promise.all([
+    getRewards(),
+    getProjects(),
+    getKeyDates(),
+    getRoutines(true),
+    getScoreSnapshots(config.ui.sparklinePoints),
+  ]);
+  const wip = computeWipStatus(allProjects);
+  // "Not-done" projects a reward or key date can be pinned to.
+  const assignableProjects = allProjects.filter((p) => !p.isTerminal);
 
   const projectsById = Object.fromEntries(
     allProjects.map((p) => [p.id, { name: p.name, stage: p.stage }]),
