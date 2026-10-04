@@ -71,7 +71,7 @@ export type MoveActionResult =
  */
 async function nextMove(): Promise<TodaysMove> {
   try {
-    return await getTodaysMove();
+    return await getTodaysMove(undefined, { fresh: true });
   } catch (error) {
     if (isDomainError(error)) return { status: 'empty', copy: 'Nothing in flight. Good.' };
     throw error;

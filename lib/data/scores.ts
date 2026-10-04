@@ -7,6 +7,7 @@ import {
   computeFlow,
   computeFocusWeek,
   isArea,
+  reconcileLiveNow,
   weekStartSgt,
   type FlowScoreBreakdown,
 } from '@/lib/scores';
@@ -27,12 +28,14 @@ import { unwrap, unwrapNullable } from './errors';
 import { syncGithubProgress, type GithubSyncResult } from './github';
 import { getAllKeyDateRows, fetchKeyDateRows } from './key-dates';
 import {
+  fetchDidItEvents,
   fetchProgressEventsSince,
   getDidItEvents,
   getProgressEventsSince,
   progressLookbackStart,
 } from './progress-events';
 import {
+  fetchProjectRows,
   getAllProjectRows,
   getAllStageEvents,
   getStageEvents,
@@ -41,7 +44,7 @@ import {
 } from './projects';
 import { applyRewardLockingRule, type RewardLockResult } from './rewards';
 import { fetchRoutineChecks, fetchRoutines } from './routines';
-import { getCurrentSeason } from './seasons';
+import { fetchCurrentSeason, getCurrentSeason } from './seasons';
 
 /* ================================================================== */
 /* Pure assembly (shared with the dashboard, which loads its own rows) */
@@ -58,6 +61,12 @@ export function focusWeekFromRows(
   weekStart: DateKey,
   now: Date | DateKey = new Date(),
 ): FocusWeekBreakdown {
+  // Rows are stamped by the database clock, `now` is the app's: never let a
+  // live `now` sit before a row we just read (see `reconcileLiveNow`).
+  const liveNow = reconcileLiveNow(now, [
+    ...rows.stageEvents.map((e) => e.created_at),
+    ...rows.progressEvents.map((e) => e.created_at),
+  ]);
   return computeFocusWeek(
     {
       projects: rows.projects,
@@ -66,7 +75,7 @@ export function focusWeekFromRows(
       keyDates: rows.keyDates.filter((k) => k.project_id != null),
     },
     weekStart,
-    now,
+    liveNow,
   );
 }
 
@@ -98,27 +107,34 @@ export function countersFromRows(
 /**
  * This week's Focus, live (SPEC-V2 §3): computed on read from events since
  * Monday 00:00 SGT — a Did-it tap moves it on the next read, no recompute.
- * Four parallel reads, each deduped per request.
+ * Four parallel reads, each deduped per request — or, with `fresh: true`
+ * (a read that follows a write in the same request, e.g. the response of a
+ * mutation), four uncached reads (ARCHITECTURE.md, "Read-after-write").
  */
-export async function getFocusWeek(now: Date = new Date()): Promise<FocusWeekBreakdown> {
+export async function getFocusWeek(
+  now: Date = new Date(),
+  options: { fresh?: boolean } = {},
+): Promise<FocusWeekBreakdown> {
   const asOf = today();
-  const [projects, stageEvents, progressEvents, keyDates] = await Promise.all([
-    getAllProjectRows(),
-    getAllStageEvents(),
-    getProgressEventsSince(progressLookbackStart(asOf)),
-    getAllKeyDateRows(),
-  ]);
+  const from = progressLookbackStart(asOf);
+  const [projects, stageEvents, progressEvents, keyDates] = await Promise.all(
+    options.fresh
+      ? [fetchProjectRows(), getStageEvents(), fetchProgressEventsSince(from), fetchKeyDateRows()]
+      : [getAllProjectRows(), getAllStageEvents(), getProgressEventsSince(from), getAllKeyDateRows()],
+  );
   return focusWeekFromRows({ projects, stageEvents, progressEvents, keyDates }, weekStartSgt(now), now);
 }
 
 /** Up-only counters for the current season and lifetime (SPEC-V2 §3, §7). */
-export async function getCounters(now: Date = new Date()): Promise<CountersSummary> {
-  const [projects, stageEvents, didItEvents, season] = await Promise.all([
-    getAllProjectRows(),
-    getAllStageEvents(),
-    getDidItEvents(),
-    getCurrentSeason(),
-  ]);
+export async function getCounters(
+  now: Date = new Date(),
+  options: { fresh?: boolean } = {},
+): Promise<CountersSummary> {
+  const [projects, stageEvents, didItEvents, season] = await Promise.all(
+    options.fresh
+      ? [fetchProjectRows(), getStageEvents(), fetchDidItEvents(), fetchCurrentSeason()]
+      : [getAllProjectRows(), getAllStageEvents(), getDidItEvents(), getCurrentSeason()],
+  );
   return countersFromRows({ projects, stageEvents, didItEvents, season }, now);
 }
 

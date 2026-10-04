@@ -22,13 +22,15 @@ import {
   unwrapNullable,
 } from './errors';
 import {
+  fetchDailyMovesSince,
+  fetchProgressEventsSince,
   getDailyMovesSince,
   getProgressEventsSince,
   progressLookbackStart,
   recordProgress,
   rotationLookbackStart,
 } from './progress-events';
-import { getAllProjectRows, isTerminalStage, toProjectWithMeta } from './projects';
+import { fetchProjectRows, getAllProjectRows, isTerminalStage, toProjectWithMeta } from './projects';
 
 /* ================================================================== */
 /* Reads                                                              */
@@ -39,12 +41,25 @@ import { getAllProjectRows, isTerminalStage, toProjectWithMeta } from './project
  * (projects, recent progress, recent daily moves), each deduped per request,
  * then the pure `pickTodaysMove` from lib/scores.ts.
  */
-export async function getTodaysMove(asOf: DateKey = today()): Promise<TodaysMove> {
-  const [projects, progress, moves] = await Promise.all([
-    getAllProjectRows(),
-    getProgressEventsSince(progressLookbackStart(asOf)),
-    getDailyMovesSince(rotationLookbackStart(asOf)),
-  ]);
+export async function getTodaysMove(
+  asOf: DateKey = today(),
+  options: { fresh?: boolean } = {},
+): Promise<TodaysMove> {
+  // `fresh` = a read that follows a write in this request: skip the per-request
+  // cache so the write is seen (ARCHITECTURE.md, "Read-after-write").
+  const [projects, progress, moves] = await Promise.all(
+    options.fresh
+      ? [
+          fetchProjectRows(),
+          fetchProgressEventsSince(progressLookbackStart(asOf)),
+          fetchDailyMovesSince(rotationLookbackStart(asOf)),
+        ]
+      : [
+          getAllProjectRows(),
+          getProgressEventsSince(progressLookbackStart(asOf)),
+          getDailyMovesSince(rotationLookbackStart(asOf)),
+        ],
+  );
   return pickTodaysMove(projects, progress, moves, asOf);
 }
 

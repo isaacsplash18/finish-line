@@ -82,6 +82,41 @@ function resolveNow(
 }
 
 /**
+ * How far the database clock may run ahead of the app clock before we stop
+ * trusting it. Rows get `created_at` from Postgres `now()`, but a live
+ * `computeFocusWeek` drops rows stamped after its `now` (the app's clock), so a
+ * fraction of a second of skew makes a write that just committed invisible to
+ * the very next read — the Did-it you just tapped is missing from the Focus.
+ */
+export const CLOCK_SKEW_TOLERANCE_MS = 60_000;
+
+/**
+ * Make a LIVE `now` safe against database/app clock skew: never earlier than
+ * the newest row timestamp we just read, as long as that stamp is within
+ * `CLOCK_SKEW_TOLERANCE_MS` of the wall clock. Not live (a bare date, or an
+ * instant more than the tolerance away from the real clock — i.e. a historical
+ * replay) ⇒ returned untouched, so "as of" views still hide later rows.
+ * Pure: pass `wallClock` to test.
+ */
+export function reconcileLiveNow(
+  now: Date | string,
+  createdAts: Iterable<string | null | undefined>,
+  wallClock: number = Date.now(),
+): Date | string {
+  if (typeof now === 'string' && isDateKey(now)) return now;
+  const instant = (typeof now === 'string' ? new Date(now) : now).getTime();
+  if (Number.isNaN(instant) || Math.abs(instant - wallClock) > CLOCK_SKEW_TOLERANCE_MS) return now;
+  let newest = instant;
+  for (const createdAt of createdAts) {
+    if (!createdAt) continue;
+    const at = new Date(createdAt).getTime();
+    if (Number.isNaN(at) || at <= newest || at - wallClock > CLOCK_SKEW_TOLERANCE_MS) continue;
+    newest = at;
+  }
+  return newest === instant ? now : new Date(newest);
+}
+
+/**
  * The kind of a project row. Rows read before migration 0002 has run have no
  * `kind` column — they are projects.
  */

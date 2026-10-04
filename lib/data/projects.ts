@@ -131,11 +131,16 @@ export interface GetProjectsOptions {
  *
  * Read path only. Mutations must not go through this — they hit Supabase
  * directly so a later re-render in the same request can't see a stale copy.
+ * A read AFTER a write in the same request uses `fetchProjectRows` instead
+ * (ARCHITECTURE.md, "Read-after-write").
  */
-export const getAllProjectRows = cache(async (): Promise<Project[]> => {
+export const getAllProjectRows = cache(fetchProjectRows);
+
+/** Uncached: every project row. Use this for reads that follow a write in the same request. */
+export async function fetchProjectRows(): Promise<Project[]> {
   const supabase = await getSupabaseServerClient();
   return unwrap(await supabase.from('projects').select('*'), 'getProjects');
-});
+}
 
 /**
  * Pure: decorate raw rows with reward + staleness metadata, apply the

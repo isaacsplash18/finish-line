@@ -16,6 +16,10 @@ export const POST = withApi(async (request) => {
   const body = await parseJsonBody(request, didItBody);
   const progress = await logProgress(body.projectId, 'did_it', { nextAction: body.nextAction });
   revalidateProjectScreens(body.projectId);
-  const [focusWeek, todaysMove] = await Promise.all([getFocusWeek(), getTodaysMove()]);
+  // Derived data after the write: uncached readers (ARCHITECTURE.md, "Read-after-write").
+  const [focusWeek, todaysMove] = await Promise.all([
+    getFocusWeek(new Date(), { fresh: true }),
+    getTodaysMove(undefined, { fresh: true }),
+  ]);
   return { ...progress, focusWeek, todaysMove };
 });

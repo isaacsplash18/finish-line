@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 
 import { config } from './config';
 import {
+  CLOCK_SKEW_TOLERANCE_MS,
   IMPORT_EVENT_MARKER,
   computeCounters,
   computeFlow,
@@ -16,6 +17,7 @@ import {
   isStuck,
   isVisibleInSeason,
   pickTodaysMove,
+  reconcileLiveNow,
   projectKindOf,
   reviewDueFor,
   reviewWeekFor,
@@ -1101,5 +1103,49 @@ describe('computeFlow', () => {
     });
     expect(result.routines).toHaveLength(1);
     expect(result.score).toBe(100);
+  });
+});
+
+/* ------------------------------------------------------------------ */
+/* Clock skew: read-after-write must see the write                     */
+/* ------------------------------------------------------------------ */
+
+describe('reconcileLiveNow (database clock ahead of the app clock)', () => {
+  // The app clock reads 12:00:00.000 SGT on Wednesday; Postgres stamped the
+  // Did-it it just committed 80 ms later than that.
+  const appClock = new Date(sgt(WED, '12:00'));
+  const skewed = new Date(appClock.getTime() + 80).toISOString();
+  const wall = appClock.getTime();
+
+  it('regression: a Did-it stamped a hair ahead of `now` is dropped by the raw live Focus', () => {
+    const input: Partial<FocusWeekInput> = {
+      projects: [proj('a', 'building', '2026-10-01')],
+      stageEvents: [ev('a', 'shipped', 'building', '2026-10-01')],
+      progressEvents: [{ project_id: 'a', kind: 'did_it', day: WED, created_at: skewed }],
+    };
+    expect(line(week(input, appClock), 'didIt').count).toBe(0); // the bug
+    const reconciled = reconcileLiveNow(appClock, [skewed], wall);
+    expect(line(week(input, reconciled), 'didIt').count).toBe(1); // the fix
+  });
+
+  it('moves a live now forward to the newest row stamp within tolerance', () => {
+    const result = reconcileLiveNow(appClock, [null, skewed, sgt(WED, '11:00')], wall);
+    expect(new Date(result).toISOString()).toBe(skewed);
+  });
+
+  it('leaves now alone when nothing is ahead of it', () => {
+    expect(reconcileLiveNow(appClock, [sgt(WED, '11:59')], wall)).toBe(appClock);
+    expect(reconcileLiveNow(appClock, [], wall)).toBe(appClock);
+  });
+
+  it('ignores stamps further ahead than the tolerance (a bad row cannot drag now forward)', () => {
+    const far = new Date(wall + CLOCK_SKEW_TOLERANCE_MS + 1_000).toISOString();
+    expect(reconcileLiveNow(appClock, [far], wall)).toBe(appClock);
+  });
+
+  it('never touches a historical or day-level now, so "as of" views still hide later rows', () => {
+    const past = new Date(sgt(TUE, '12:00'));
+    expect(reconcileLiveNow(past, [skewed], wall)).toBe(past);
+    expect(reconcileLiveNow('2026-10-07', [skewed], wall)).toBe('2026-10-07');
   });
 });

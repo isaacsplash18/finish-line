@@ -398,6 +398,30 @@ migration 0002 still renders (empty v2 sections) instead of 500ing.
 cap; `unwrapOptional(result, context, fallback)` and `isMissingSchemaError`
 degrade reads of not-yet-migrated tables.
 
+### Read-after-write — two rules
+
+1. **After a write in the same request, read uncached.** `get*` readers
+   (`getAllProjectRows`, `getAllStageEvents`, `getProgressEventsSince`,
+   `getDidItEvents`, `getDailyMovesSince`, `getCurrentSeason`, …) are
+   `React.cache`d: the first call in a request wins and every later call —
+   including one after a write — gets that same copy. Anything a mutation
+   *returns* (a route's `focusWeek` / `todaysMove` / counters, a server
+   action's next card) must come from the uncached `fetch*` readers:
+   `getFocusWeek(now, { fresh: true })`, `getCounters(now, { fresh: true })`,
+   `getTodaysMove(asOf, { fresh: true })`. The mutations themselves already
+   only use uncached reads (`loadProject`, `getActiveProjectCount`,
+   `getStageEvents`, …). Keep the cached readers for GET paths and page renders.
+2. **Row timestamps are the database's clock; `now` is the app's.** Live Focus
+   drops rows stamped after `now` (so a past "as of" view hides later events),
+   and Postgres `now()` can run tens of milliseconds to seconds ahead of the
+   Vercel lambda — enough to hide the Did-it that was just committed, in the
+   very response that recorded it and in a `GET /focus/week` straight after.
+   `focusWeekFromRows` therefore passes a live `now` through
+   `reconcileLiveNow` (`lib/scores.ts`), which lifts it to the newest row stamp
+   (within `CLOCK_SKEW_TOLERANCE_MS`, 60 s). Historical instants and bare dates
+   are never touched. Any new code that compares `created_at` to a live `new
+   Date()` needs the same reconciliation.
+
 ### Errors — `lib/data/errors.ts`
 
 `DomainError` with `code`: `VALIDATION` | `NOT_FOUND` | `INVALID_TRANSITION` |

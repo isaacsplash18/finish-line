@@ -12,5 +12,5 @@ export const POST = withApi(async (request) => {
   const body = await parseJsonBody(request, skipMoveBody);
   const skipped = await skipTodaysMove(body.projectId);
   revalidateProjectScreens();
-  return { skipped, todaysMove: await getTodaysMove() };
+  return { skipped, todaysMove: await getTodaysMove(undefined, { fresh: true }) };
 });
