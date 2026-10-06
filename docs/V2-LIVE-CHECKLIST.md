@@ -1,7 +1,7 @@
 # Finish Line v2 — post-migration live checklist
 
 For the agent that verifies v2 against the live Supabase project
-(ref `thiizublmtqgdvaclvvf`) once migration `0002_v2.sql` can be applied.
+(ref `<project-ref>`) once migration `0002_v2.sql` can be applied.
 
 **Ground rules**
 
@@ -19,7 +19,7 @@ For the agent that verifies v2 against the live Supabase project
 - Never print `API_KEY`, `WORKOUT_HOOK_TOKEN`, `APP_PASSWORD` or the anon key.
 
 ```bash
-cd "/Users/isaacho/Focus App"
+cd "~/Focus App"
 export FL=http://localhost:3100/api/v1
 export FL_KEY=$(grep '^API_KEY=' .env.local | cut -d= -f2-)
 export HOOK=$(grep '^WORKOUT_HOOK_TOKEN=' .env.local | cut -d= -f2-)

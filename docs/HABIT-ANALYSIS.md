@@ -4,10 +4,10 @@ Date: 2026-10-03. Sources: code and docs in all three apps, plus the facts about
 
 | App | Where | What it is |
 | --- | --- | --- |
-| **Tally** | `/Users/isaacho/Tally` | Two-person budget PWA (Isaac + Rachell). Next.js + Supabase `toeimgwqcewifahwunyd`. In use since 2026-08-28 (genesis week 2026-08-31). |
+| **Tally** | `~/Tally` | Two-person budget PWA (Isaac + Partner). Next.js + Supabase `<project-ref>`. In use since 2026-08-28 (genesis week 2026-08-31). |
 | **Training app** ("The Half", formerly "Strength System") | GitHub `isaacsplash18/daily-app` (public), one `index.html`, about 720 lines, data in `localStorage` | It started on 2026-07-01 as a 12-week strength block. You logged through week 8. On 2026-09-22 it was rebuilt as a 10-week half-marathon block for BYD Singapore on 6 Dec. It has had 17 commits between July and September. |
-| **Bible Reading** | `/Users/isaacho/Bible reading/bible-reading-app/index.html` | 66 books and 1,189 chapters. You tap a chapter to mark it read. It has one progress bar, stores data in `localStorage`, and has no dates, streaks or penalties. |
-| **Finish Line** | `/Users/isaacho/Focus App` | Projects, routines, Flow and Focus scores, and rewards. Next.js + Supabase `thiizublmtqgdvaclvvf`. **Does not stick.** |
+| **Bible Reading** | `~/Bible reading/bible-reading-app/index.html` | 66 books and 1,189 chapters. You tap a chapter to mark it read. It has one progress bar, stores data in `localStorage`, and has no dates, streaks or penalties. |
+| **Finish Line** | `~/Focus App` | Projects, routines, Flow and Focus scores, and rewards. Next.js + Supabase `<project-ref>`. **Does not stick.** |
 
 A note on naming: the GitHub repo `daily-app` ("Isaac's daily routines") is the strength/running app. Where this document says "the training app", it means that repo.
 
@@ -58,7 +58,7 @@ Compare the training app: when the 12-week block stopped at week 8, the app did 
 
 | App | What the first 3 seconds show | Core daily action | Cost |
 | --- | --- | --- | --- |
-| Tally | One big coloured number, "Isaac · left this week $X", with Rachell's figure and "Week closes Sun 23:59 · Nd left" underneath. The numpad is already on screen. | Log a spend | **About 3 taps, under 5 s.** No login, and your identity is remembered (`session.ts`). Client-rendered with a skeleton. |
+| Tally | One big coloured number, "Isaac · left this week $X", with the partner's figure and "Week closes Sun 23:59 · Nd left" underneath. The numpad is already on screen. | Log a spend | **About 3 taps, under 5 s.** No login, and your identity is remembered (`session.ts`). Client-rendered with a skeleton. |
 | Training app | "64 days to go · BYD Half", the Clocked-in totals, and this week's schedule with **today's row highlighted**. | Tick a session, or log weight × reps during rest between sets | **1 tap.** Static HTML, no network. Set inputs are pre-filled with the target weight calculated from your 1RM. |
 | Bible app | Chapters read out of 1,189, plus a progress bar | Mark a chapter | **2 taps** (book, chapter), or type in search. |
 | Finish Line | WIP warning, Flow 0, Focus 0, two critical captions | Either (a) tick a routine or (b) record project progress | (a) Scroll past the scores, then 1 tap, **but the score doesn't change.** (b) **3 taps, typing and 2 server round trips.** The dashboard is server-rendered from about 8 Supabase queries, plus a full recompute on the first open of each day. |
@@ -69,7 +69,7 @@ The apps that stick put the action on the screen you open to. Finish Line puts t
 
 | App | What you get back immediately |
 | --- | --- |
-| Tally | The envelope drops by exactly what you spent. The colour changes at 50% and 20%. You can see Rachell's number too. The pot and 🔥 streak in the header change at the weekly close. |
+| Tally | The envelope drops by exactly what you spent. The colour changes at 50% and 20%. You can see the partner's number too. The pot and 🔥 streak in the header change at the weekly close. |
 | Training app | The session ✓ turns green and the row is struck through. Sessions, streak (as current/best), km and kg update, and the "Next: Ten sessions 7/10" bar fills. Totals only go up. |
 | Bible app | The ring fills and the overall % goes up. It can only go up. |
 | Finish Line | The routine row turns green. Flow and Focus **don't move until midnight**. Once Focus reaches 0, it **doesn't move for up to 30 days**. Rewards stay locked whatever you do. |
@@ -97,7 +97,7 @@ Finish Line's punishment fails all three of Tally's tests. It's made of points. 
 
 ### 2.5 Social and accountability
 
-Tally's home screen shows Rachell's remaining number, and a redemption is blocked if *either* of you is frozen. That's real accountability, and it probably helps Tally's logging accuracy. **But it isn't the key ingredient.** The training app and the Bible app are completely solo, with no backend and no sharing, and they stick too. What all three have in common is: the action is on the first screen, feedback is instant, and any penalty is bounded. Sharing with Rachell is a useful extra for Finish Line (see R6), not the fix.
+Tally's home screen shows the partner's remaining number, and a redemption is blocked if *either* of you is frozen. That's real accountability, and it probably helps Tally's logging accuracy. **But it isn't the key ingredient.** The training app and the Bible app are completely solo, with no backend and no sharing, and they stick too. What all three have in common is: the action is on the first screen, feedback is instant, and any penalty is bounded. Sharing with Partner is a useful extra for Finish Line (see R6), not the fix.
 
 ### 2.6 Data honesty
 
@@ -139,7 +139,7 @@ Keep: the soft cap (show the price, never block), kill as a respectable exit wit
 - Every Sunday evening (Tally's week closes Sunday 23:59 and the training app's weeks run Monday to Sunday, so all three line up), run a 3–5 minute review, one screen per active project. Each project gets one tap: **Done / Moved stage / Worked on it / Park (back to Idea, free) / Kill (reason, +10)**.
 - Then pick **next week's one focus project** and its next action. That becomes R1's home card.
 - Stuck is decided **here**, not by a 14-day timer: a project is stuck if it gets two weekly reviews in a row with no progress. You're the one confirming it, so it's honest.
-- The review ends with a summary card. Optionally it goes to Rachell (R6).
+- The review ends with a summary card. Optionally it goes to Partner (R6).
 
 ### R4. Detect progress automatically
 
@@ -159,7 +159,7 @@ Keep: the soft cap (show the price, never block), kill as a respectable exit wit
 - When the fund covers the price of an item on the list (boxing gloves, headgear, AirPods), you can claim it.
 - A stuck project **pauses earning for one week**, the same mechanism as Tally's freeze. It no longer locks every reward.
 - Abandon still forfeits.
-- **Rachell:** let her see the fund and the weekly review summary, read-only, through a link or a card in Tally. Because she shares the pot in Tally, her visibility gives the reward real weight. Ask her before building this. It works as a bonus, not as the foundation.
+- **Partner:** let her see the fund and the weekly review summary, read-only, through a link or a card in Tally. Because she shares the pot in Tally, her visibility gives the reward real weight. Ask her before building this. It works as a bonus, not as the foundation.
 
 ### R7. Take routines off the Finish Line home screen and feed them automatically
 
@@ -185,7 +185,7 @@ Keep: the soft cap (show the price, never block), kill as a respectable exit wit
 | **A. Keep 3 separate apps, no links** (status quo) | Nothing changes, so nothing breaks | Workouts and Bible still need double entry, and Flow stays dead | 0 |
 | **B. Keep 3 apps, add a one-way event pipe** (training app → Finish Line Workouts, optionally Bible → Finish Line) | No double entry, and the Workouts routine ticks itself. Each app stays fast and single-purpose. | Almost nothing | **About 1–2 hours:** one ingest route with CORS and a narrow token, plus about 15 lines in `daily-app/index.html` |
 | **C. Keep 3 apps on one Supabase, plus one shared "Today" home page** | One glance at everything | The training app's no-backend simplicity: it would need syncing, and its one-evening rebuilds get heavier. Tally's 3-tap log gets a launcher in front of it. RLS policy has to be redesigned (Tally is permissive anon, Finish Line has RLS off). | **Days.** Merge two Supabase projects, move the training app off `localStorage`, plan the auth/RLS approach. |
-| **D. Move Finish Line's project tracker into Tally as a tab** | It rides on an app you already open daily, and Rachell can see it | Tally is a **shared money app with no auth**. Identity is a `localStorage` toggle, so Rachell could tap your projects and your project list goes into her budget app. The tab bar grows and the 5-second log flow gets diluted. You'd be porting Finish Line's server-side data layer into Tally's client-side engine. **It risks breaking the app that works.** | **About 1 week** |
+| **D. Move Finish Line's project tracker into Tally as a tab** | It rides on an app you already open daily, and Partner can see it | Tally is a **shared money app with no auth**. Identity is a `localStorage` toggle, so Partner could tap your projects and your project list goes into her budget app. The tab bar grows and the 5-second log flow gets diluted. You'd be porting Finish Line's server-side data layer into Tally's client-side engine. **It risks breaking the app that works.** | **About 1 week** |
 | **E. One life-dashboard PWA for all of it** | One install, one combined score | Each app's single-purpose speed. The training app is easy to rebuild because it's one HTML file. The four-cadence mixing problem gets worse, not better (§2.3). It puts Finish Line's broken loop at the front of the apps that work. | **1–2 weeks or more** |
 
 ### Recommendation

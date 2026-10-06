@@ -45,7 +45,7 @@ Unlimited Idea-stage projects allowed. Ideas cost nothing. The cap only bites wh
    1. Project goes Stuck (14 days idle) → all unclaimed rewards lock until the stuck project moves stage or is killed.
    2. Project marked Abandoned → its reward is permanently forfeited (deleted, with a tombstone shown on the dashboard: "Forfeited: $300 watch strap").
    3. Starting a 4th active project is simply impossible (see 3.2), which is the strongest anti-shiny mechanic available.
-4. Optional stake (v1.1): attach a dollar stake to a project; abandonment generates a "pay Rachell / give away" IOU entry. Not enforceable by software, so it is secondary.
+4. Optional stake (v1.1): attach a dollar stake to a project; abandonment generates a "pay Partner / give away" IOU entry. Not enforceable by software, so it is secondary.
 
 ## 5. Routines module
 
